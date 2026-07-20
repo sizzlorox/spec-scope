@@ -1,0 +1,11 @@
+# Authored on Windows, published as an OSS repo: never commit CRLF.
+* text=auto eol=lf
+
+# Generated — keep out of diffs and language stats.
+package-lock.json linguist-generated=true -diff
+*.min.js linguist-generated=true -diff
+
+# Binary assets must not be line-ending normalised.
+*.png binary
+*.jpg binary
+*.ico binary

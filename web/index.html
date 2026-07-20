@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>spec-scope</title>
+    <!-- Inline data: favicon (the brand mark) so no /favicon.ico request 404s and
+       the page stays self-contained; the server's CSP allows img-src data:. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%3E%3Ctext%20y='13'%20font-size='13'%3E%E2%97%88%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1 class="visually-hidden">spec-scope</h1>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">◈</span>
+        <span class="brand-name">spec-scope</span>
+        <span id="flavor-badge" class="badge badge-quiet">loading…</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="theme-toggle" type="button" aria-live="off">Theme: auto</button>
+        <button id="help-toggle" type="button" aria-expanded="false" aria-controls="help-popover">
+          Shortcuts <kbd>?</kbd>
+        </button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" aria-label="Specification tree">
+        <div class="filter-row">
+          <label class="visually-hidden" for="filter">Filter documents</label>
+          <input
+            id="filter"
+            type="search"
+            placeholder="Filter documents (press /)"
+            autocomplete="off"
+          />
+        </div>
+        <nav id="tree" class="tree"></nav>
+      </aside>
+
+      <main id="doc" class="doc" tabindex="-1">
+        <p class="empty">Loading specs…</p>
+      </main>
+
+      <aside class="panel" aria-label="Discussion">
+        <div class="panel-head">
+          <h2 id="panel-title">Discussion</h2>
+          <p id="panel-anchor" class="panel-anchor">Nothing selected.</p>
+        </div>
+
+        <div id="notes" class="notes" aria-live="polite" aria-busy="false"></div>
+
+        <form id="composer" class="composer" hidden>
+          <label class="visually-hidden" for="composer-kind">Note kind</label>
+          <select id="composer-kind">
+            <option value="question">Question — ask the agent</option>
+            <option value="change">Change — request an edit</option>
+            <option value="resolve">Resolve — mark settled</option>
+          </select>
+          <label class="visually-hidden" for="composer-body">Note body</label>
+          <textarea
+            id="composer-body"
+            rows="4"
+            placeholder="Add a note. Ctrl/Cmd+Enter to submit."
+          ></textarea>
+          <div class="composer-actions">
+            <span class="hint">Ctrl/Cmd+Enter</span>
+            <button type="submit" class="primary">Add note</button>
+          </div>
+        </form>
+      </aside>
+    </div>
+
+    <div
+      id="help-popover"
+      class="help-popover"
+      role="dialog"
+      aria-label="Keyboard shortcuts"
+      hidden
+    >
+      <h2>Keyboard shortcuts</h2>
+      <dl>
+        <dt><kbd>/</kbd></dt>
+        <dd>Focus the document filter</dd>
+        <dt><kbd>Esc</kbd></dt>
+        <dd>Clear the current selection</dd>
+        <dt><kbd>?</kbd></dt>
+        <dd>Toggle this help</dd>
+        <dt><kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Enter</kbd></dt>
+        <dd>Submit the note or reply you are typing</dd>
+      </dl>
+      <button id="help-close" type="button">Close</button>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/mermaid.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

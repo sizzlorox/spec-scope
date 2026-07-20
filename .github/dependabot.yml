@@ -1,0 +1,47 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      # Conventional Commits, because release-please parses these.
+      # Runtime deps (mermaid, marked) are vendored into what users ship, so a bump
+      # there is user-visible: `fix(deps)` gets it a patch release and a changelog line.
+      # Dev deps affect nobody downstream: `build(deps-dev)` stays out of the changelog.
+      prefix: "fix"
+      prefix-development: "build"
+      include: scope
+    groups:
+      # Lint and formatting tooling moves together and never affects users.
+      dev-tooling:
+        dependency-type: development
+        patterns:
+          - "eslint*"
+          - "typescript-eslint"
+          - "prettier*"
+          - "@types/*"
+    ignore:
+      # Mermaid and Marked are vendored verbatim into exported tech docs, so a
+      # major bump can change rendering for every document a user has already
+      # produced. Those upgrades get reviewed deliberately, not automatically.
+      - dependency-name: mermaid
+        update-types: ["version-update:semver-major"]
+      - dependency-name: marked
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci"
+      include: scope

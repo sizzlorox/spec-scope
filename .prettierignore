@@ -1,0 +1,13 @@
+# Build output and dependencies
+dist
+node_modules
+coverage
+
+# Generated, not hand-authored
+package-lock.json
+
+# Parser tests assert on exact whitespace — reformatting these breaks them
+test/fixtures
+
+# Owned by release-please
+CHANGELOG.md

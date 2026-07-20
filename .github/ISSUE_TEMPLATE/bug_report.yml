@@ -1,0 +1,151 @@
+name: Bug report
+description: Something in spec-scope behaves incorrectly.
+title: "fix: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug.
+
+        **Security vulnerabilities do not belong here.** Report those privately via
+        [GitHub Security Advisories](https://github.com/sizzlorox/spec-scope/security/advisories/new).
+
+        If this is a parsing or diagram bug, the single most useful thing you can
+        provide is the smallest Markdown snippet that reproduces it — that snippet
+        becomes the regression fixture.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched [existing issues](https://github.com/sizzlorox/spec-scope/issues?q=is%3Aissue) and this isn't a duplicate.
+          required: true
+        - label: I'm on the latest version of spec-scope, or I've noted below why I can't be.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed. Be concrete.
+      placeholder: The sequence diagram for a scenario with an annotated actor renders with a blank participant lane.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran.
+      value: |
+        1. In a project laid out like `...`
+        2. Run `spec-scope ...`
+        3. Open `...`
+        4. See the error
+    validations:
+      required: true
+
+  - type: textarea
+    id: spec-snippet
+    attributes:
+      label: Minimal spec snippet
+      description: >
+        The smallest piece of Markdown that reproduces this. Rendered as Markdown,
+        so no backticks needed.
+      render: markdown
+      placeholder: |
+        ### Requirement: Example
+
+        #### Scenario: Example scenario
+
+        - **WHEN** Agent: does the thing
+        - **THEN** the thing is done
+    validations:
+      required: false
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >
+        Relevant terminal output, browser console errors, or generated Mermaid source.
+        Automatically formatted as code.
+      render: shell
+    validations:
+      required: false
+
+  - type: dropdown
+    id: flavor
+    attributes:
+      label: Spec flavor
+      options:
+        - OpenSpec
+        - Spec Kit
+        - Not sure / neither
+        - Not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      description: Best guess is fine.
+      options:
+        - Detection (wrong flavor or root)
+        - Parsing (requirements, scenarios, tasks)
+        - Diagram generation
+        - Review server / browser UI
+        - Notes and the poll/resolve loop
+        - Tech doc export
+        - CLI
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: spec-scope version
+      description: Output of `spec-scope --version`.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: Output of `node --version`.
+      placeholder: v22.11.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - WSL
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Workarounds you found, when it started, or how it relates to something else.
+    validations:
+      required: false

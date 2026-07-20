@@ -1,0 +1,28 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    steps:
+      # Maintains a rolling release PR from Conventional Commits. Merging that PR
+      # bumps the version, writes CHANGELOG.md, tags, and creates the GitHub release.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release-type: node
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

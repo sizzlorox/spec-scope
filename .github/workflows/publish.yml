@@ -1,0 +1,47 @@
+name: Publish
+
+# Publishes the package to npm when a GitHub release is published. release-please
+# does the versioning (it tags and cuts the GitHub release); this workflow reacts
+# to that release and pushes the build to the npm registry.
+#
+# Requires an NPM_TOKEN repository secret — an npm automation token with publish
+# rights for the `spec-scope` package. `--provenance` additionally relies on the
+# `id-token: write` permission below (OIDC), which is what lets npm attest that
+# this build came from this workflow.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: npm publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
