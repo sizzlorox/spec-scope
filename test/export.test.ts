@@ -17,11 +17,28 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { changeEntries } from '../src/changes.js';
 import { formatNote, printNotes } from '../src/cli.js';
 import { exportTechDoc, renderTechDoc } from '../src/export.js';
+import { docStructureSource, requirementSource, scenarioSource, specHash } from '../src/hash.js';
 import { diagramId, docId, groupId, requirementId, scenarioId } from '../src/ids.js';
 import { NoteStore } from '../src/notes.js';
-import type { Diagram, Note, SpecDoc, SpecGroup, SpecModel } from '../src/types.js';
+import { ReviewStore } from '../src/review.js';
+import type {
+  AuthoredDiagram,
+  ChangeEntry,
+  Decision,
+  Diagram,
+  DiagramSkip,
+  Explanation,
+  GlossaryTerm,
+  Note,
+  ReviewFile,
+  ReviewStamp,
+  SpecDoc,
+  SpecGroup,
+  SpecModel,
+} from '../src/types.js';
 
 const XSS = '<script>alert(1)</script>';
 
@@ -261,6 +278,465 @@ test('a print stylesheet is present for PDF review', () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* review layer — decisions, explanations, stamps, glossary, changes          */
+/* -------------------------------------------------------------------------- */
+
+function reviewFile(overrides: Partial<ReviewFile> = {}): ReviewFile {
+  return {
+    version: 1,
+    decisions: [],
+    stamps: [],
+    explanations: [],
+    glossary: [],
+    diagrams: [],
+    diagramSkips: [],
+    ...overrides,
+  };
+}
+
+/** Render with a seeded review (and optional changes) against the standard model. */
+function renderReview(review: ReviewFile, changes: ChangeEntry[] = [], notes: Note[] = []): string {
+  return renderTechDoc(buildModel(), DIAGRAMS, notes, VENDOR, review, changes);
+}
+
+const BASE_DECISION: Decision = {
+  id: 'dec_seed',
+  title: 'Adopt platform passkeys',
+  context: 'We need phishing-resistant authentication for the sign-in flow.',
+  options: ['Passwords', 'TOTP', 'Passkeys'],
+  choice: 'Use platform passkeys as the primary factor.',
+  tradeoffs: 'Devices without a platform authenticator need a fallback path.',
+  consequence: 'The password-reset flow can be retired.',
+  provenance: 'grounded',
+  sources: [
+    { kind: 'requirement', anchor: R_ID, label: 'Login', quote: 'SHALL authenticate a user' },
+  ],
+  status: 'recorded',
+  author: 'reviewer',
+  createdAt: '2026-01-02T00:00:00.000Z',
+};
+
+const BASE_EXPLANATION: Explanation = {
+  id: 'exp_seed',
+  anchor: R_ID,
+  anchorLabel: 'Auth / Authentication / Login',
+  kind: 'summary',
+  body: 'In plain terms: a returning user proves who they are and gets a session.',
+  provenance: 'grounded',
+  sources: [{ kind: 'requirement', anchor: R_ID }],
+  specHash: '',
+  author: 'agent',
+  createdAt: '2026-01-02T00:00:00.000Z',
+};
+
+test('the decision ledger lists recorded decisions, badged and sourced', () => {
+  const html = renderReview(reviewFile({ decisions: [BASE_DECISION] }));
+  assert.ok(html.includes('id="decision-ledger"'), 'ledger section present');
+  assert.ok(html.includes('Adopt platform passkeys'), 'decision title rendered');
+  assert.ok(html.includes('Use platform passkeys as the primary factor.'), 'choice rendered');
+  assert.ok(/badge-grounded[^>]*>grounded<\/span>/.test(html), 'provenance badge rendered');
+  assert.ok(html.includes(`href="#${R_ID}"`), 'source links back to the requirement');
+  assert.ok(html.includes('1 recorded decision'), 'cover tally counts the recorded decision');
+  assert.ok(html.includes('<a href="#decision-ledger">'), 'ledger is linked from the contents');
+});
+
+test('open and superseded decisions are kept out of the ledger', () => {
+  const open = {
+    ...BASE_DECISION,
+    id: 'dec_open',
+    title: 'Still debating logout',
+    status: 'open' as const,
+  };
+  const html = renderReview(reviewFile({ decisions: [open] }));
+  assert.ok(!html.includes('id="decision-ledger"'), 'an open-only review omits the ledger');
+  assert.ok(!html.includes('Still debating logout'), 'the open decision is not shown');
+  assert.ok(html.includes('0 recorded decisions'), 'cover tally reports zero recorded decisions');
+});
+
+test('grounded/inferred summaries build the plain overview lead', () => {
+  const html = renderReview(reviewFile({ explanations: [BASE_EXPLANATION] }));
+  assert.ok(html.includes('id="overview"'), 'overview section present');
+  assert.ok(
+    html.includes('a returning user proves who they are and gets a session'),
+    'summary prose forms the lead'
+  );
+  assert.ok(html.includes('<a href="#overview">Overview</a>'), 'overview linked from the contents');
+});
+
+test('unstated explanations and undefined glossary terms surface as open questions', () => {
+  const unstated: Explanation = {
+    ...BASE_EXPLANATION,
+    id: 'exp_gap',
+    body: 'The spec never states how long a session remains valid.',
+    provenance: 'unstated',
+    specHash: '',
+  };
+  const term: GlossaryTerm = {
+    id: 'term_pa',
+    term: 'platform authenticator',
+    definition: '',
+    provenance: 'unstated',
+    sources: [],
+    defined: false,
+    author: 'agent',
+    createdAt: '2026-01-02T00:00:00.000Z',
+  };
+  const html = renderReview(reviewFile({ explanations: [unstated], glossary: [term] }));
+  assert.ok(html.includes('id="open-questions"'), 'open questions section present');
+  assert.ok(
+    html.includes('The spec never states how long a session remains valid.'),
+    'unstated body listed'
+  );
+  assert.ok(html.includes('platform authenticator'), 'undefined term listed');
+  assert.ok(html.includes('undefined term'), 'the term is flagged as undefined, not defined');
+  assert.ok(!html.includes('id="appendix-glossary"'), 'an undefined term never opens the glossary');
+  // Honesty: an unstated summary must not be laundered into the plain overview lead.
+  assert.ok(!html.includes('id="overview"'), 'unstated summary is kept out of the overview');
+  assert.ok(html.includes('2 open questions'), 'cover tally counts both open questions');
+});
+
+test('blocking and concern stamps are raised as open questions', () => {
+  const blocking: ReviewStamp = {
+    id: 'stamp_b',
+    anchor: S_ID,
+    anchorLabel: 'Auth / Login / Happy path',
+    verdict: 'blocking',
+    note: 'The session lifetime is unspecified.',
+    author: 'reviewer',
+    createdAt: '2026-01-02T00:00:00.000Z',
+  };
+  const html = renderReview(reviewFile({ stamps: [blocking] }));
+  assert.ok(html.includes('id="open-questions"'), 'open questions section present');
+  assert.ok(/badge-blocking[^>]*>blocking<\/span>/.test(html), 'blocking verdict badged');
+  assert.ok(html.includes('The session lifetime is unspecified.'), 'stamp note carried through');
+  assert.ok(html.includes('1 open question'), 'a single open question is singular in the tally');
+});
+
+test('a stamped verdict switches the requirement map to the review heat map', () => {
+  const stamp: ReviewStamp = {
+    id: 'stamp_c',
+    anchor: R_ID,
+    anchorLabel: 'Auth / Login',
+    verdict: 'concern',
+    author: 'reviewer',
+    createdAt: '2026-01-02T00:00:00.000Z',
+  };
+  const html = renderReview(reviewFile({ stamps: [stamp] }));
+  assert.ok(html.includes('review heat map'), 'heat-map diagram is rendered');
+  assert.ok(html.includes('classDef concern'), 'heat-map carries the verdict styling');
+});
+
+test('a summary is marked stale only when its spec hash no longer matches', () => {
+  const model = buildModel();
+  const req = model.docs[0]?.requirements[0];
+  assert.ok(req, 'fixture requirement exists');
+  const freshHash = specHash(
+    requirementSource(
+      req.name,
+      req.text,
+      req.scenarios.map((s) => s.name)
+    )
+  );
+
+  const fresh: Explanation = { ...BASE_EXPLANATION, specHash: freshHash };
+  const freshHtml = renderTechDoc(
+    model,
+    DIAGRAMS,
+    [],
+    VENDOR,
+    reviewFile({ explanations: [fresh] }),
+    []
+  );
+  // `.badge-stale` is always defined in the stylesheet; assert on the rendered badge.
+  assert.ok(!/>stale<\/span>/.test(freshHtml), 'a matching hash is not marked stale');
+
+  const stale: Explanation = { ...BASE_EXPLANATION, specHash: 'deadbeefdeadbeef' };
+  const staleHtml = renderTechDoc(
+    model,
+    DIAGRAMS,
+    [],
+    VENDOR,
+    reviewFile({ explanations: [stale] }),
+    []
+  );
+  assert.ok(/badge-stale[^>]*>stale<\/span>/.test(staleHtml), 'a stale hash is marked stale');
+});
+
+test('a scenario narration is marked stale when its steps change under it', () => {
+  const model = buildModel();
+  const scn = model.docs[0]?.requirements[0]?.scenarios[0];
+  assert.ok(scn, 'fixture scenario exists');
+  const freshHash = specHash(
+    scenarioSource(
+      scn.name,
+      scn.steps.map((s) => s.text)
+    )
+  );
+
+  const narration: Explanation = {
+    ...BASE_EXPLANATION,
+    id: 'exp_narr',
+    anchor: S_ID,
+    kind: 'narration',
+    body: 'Walkthrough: the user signs in and a session opens.',
+    specHash: freshHash,
+  };
+  const fresh = renderTechDoc(
+    model,
+    DIAGRAMS,
+    [],
+    VENDOR,
+    reviewFile({ explanations: [narration] }),
+    []
+  );
+  assert.ok(
+    fresh.includes('Walkthrough: the user signs in and a session opens.'),
+    'narration inlined'
+  );
+  assert.ok(!/>stale<\/span>/.test(fresh), 'a matching narration hash is not stale');
+
+  const stale = renderTechDoc(
+    model,
+    DIAGRAMS,
+    [],
+    VENDOR,
+    reviewFile({ explanations: [{ ...narration, specHash: 'ffffffffffffffff' }] }),
+    []
+  );
+  assert.ok(
+    /badge-stale[^>]*>stale<\/span>/.test(stale),
+    'a drifted narration hash is marked stale'
+  );
+});
+
+test('a script-laden decision title is escaped, never emitted as live markup', () => {
+  const hostile = { ...BASE_DECISION, id: 'dec_xss', title: `Ship ${XSS}` };
+  const html = renderReview(reviewFile({ decisions: [hostile] }));
+  assert.ok(!html.includes(`Ship ${XSS}`), 'the raw payload never appears in a decision title');
+  assert.ok(
+    html.includes('Ship &lt;script&gt;alert(1)&lt;/script&gt;'),
+    'the title appears escaped'
+  );
+});
+
+test('the changes appendix quotes the before/after fragments', () => {
+  const changes: ChangeEntry[] = [
+    {
+      anchor: R_ID,
+      requirement: 'Login',
+      delta: 'MODIFIED',
+      summary: 'Requirement "Login" was MODIFIED; only the current text is shown.',
+      after: 'The system SHALL authenticate a user with a platform passkey.',
+    },
+    {
+      anchor: 'doc:auth/req:legacy',
+      requirement: 'Legacy password login',
+      delta: 'REMOVED',
+      summary: 'Requirement "Legacy password login" was REMOVED; the text below is deleted.',
+      before: 'The system SHALL accept a username and password.',
+    },
+  ];
+  const html = renderReview(reviewFile(), changes);
+  assert.ok(html.includes('id="appendix-changes"'), 'changes appendix present');
+  assert.ok(html.includes('badge-modified">MODIFIED'), 'modified delta badged');
+  assert.ok(html.includes('badge-removed">REMOVED'), 'removed delta badged');
+  assert.ok(
+    html.includes('The system SHALL authenticate a user with a platform passkey.'),
+    'after quoted'
+  );
+  assert.ok(html.includes('The system SHALL accept a username and password.'), 'before quoted');
+  assert.ok(
+    html.includes('<a href="#appendix-changes">Changes</a>'),
+    'changes linked from contents'
+  );
+  // The default 4-arg render passes no changes, so the appendix must stay absent.
+  assert.ok(!render().includes('id="appendix-changes"'), 'no changes means no appendix');
+});
+
+test('defined glossary terms populate the glossary appendix, badged', () => {
+  const term: GlossaryTerm = {
+    id: 'term_session',
+    term: 'session',
+    definition: 'A server-issued token proving the user recently authenticated.',
+    provenance: 'inferred',
+    sources: [],
+    defined: true,
+    author: 'agent',
+    createdAt: '2026-01-02T00:00:00.000Z',
+  };
+  const html = renderReview(reviewFile({ glossary: [term] }));
+  assert.ok(html.includes('id="appendix-glossary"'), 'glossary appendix present');
+  assert.ok(
+    html.includes('A server-issued token proving the user recently authenticated.'),
+    'definition shown'
+  );
+  assert.ok(/badge-inferred[^>]*>inferred<\/span>/.test(html), 'term carries a provenance badge');
+});
+
+test('a review-laden export is still one self-contained offline document', () => {
+  const changes = changeEntries(buildModel());
+  const review = reviewFile({
+    decisions: [BASE_DECISION],
+    explanations: [BASE_EXPLANATION],
+    stamps: [
+      {
+        id: 'stamp_z',
+        anchor: R_ID,
+        anchorLabel: 'Auth / Login',
+        verdict: 'concern',
+        author: 'reviewer',
+        createdAt: '2026-01-02T00:00:00.000Z',
+      },
+    ],
+    glossary: [
+      {
+        id: 'term_z',
+        term: 'session',
+        definition: 'A short-lived proof of authentication.',
+        provenance: 'inferred',
+        sources: [],
+        defined: true,
+        author: 'agent',
+        createdAt: '2026-01-02T00:00:00.000Z',
+      },
+    ],
+  });
+  const html = renderReview(review, changes);
+  assert.ok(html.startsWith('<!doctype html>'), 'still a single document');
+  assert.equal(html.match(/<\/html>/g)?.length, 1, 'exactly one </html>');
+  assert.ok(!/<script[^>]+\ssrc=/i.test(html), 'no external scripts');
+  assert.ok(!/<link[^>]+stylesheet/i.test(html), 'no external stylesheets');
+  assert.ok(!/\ssrc\s*=\s*["']https?:/i.test(html), 'no remote asset sources');
+  assert.ok(!/url\(\s*["']?https?:/i.test(html), 'no remote CSS urls');
+});
+
+test('a review with missing and hostile fields renders instead of throwing', () => {
+  const hostile = {
+    version: 1,
+    decisions: [
+      { id: 'd_half', title: 'Half-written decision', choice: 'do the thing', status: 'recorded' },
+    ],
+    stamps: [{ id: 's_half', anchor: R_ID, verdict: 'blocking' }],
+    explanations: [{ anchor: R_ID, kind: 'summary', body: 4242 }],
+    glossary: [{ term: 'thing', defined: false }],
+  } as unknown as ReviewFile;
+
+  let html = '';
+  assert.doesNotThrow(() => {
+    html = renderReview(hostile);
+  }, 'a half-written review.json must not throw the exporter');
+  assert.ok(html.includes('Half-written decision'), 'coerced decision still rendered');
+  assert.ok(html.includes('4242'), 'a numeric explanation body is coerced to text, not dropped');
+  assert.ok(
+    html.includes('id="open-questions"'),
+    'the blocking stamp still raises an open question'
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/* review layer — agent-authored diagrams                                     */
+/* -------------------------------------------------------------------------- */
+
+/** A seed authored diagram anchored to the fixture doc; override per test. */
+function authoredDiagram(overrides: Partial<AuthoredDiagram> = {}): AuthoredDiagram {
+  return {
+    id: 'diag_seed',
+    title: 'Session lifecycle',
+    type: 'state',
+    anchor: D_ID,
+    anchorLabel: 'Auth / Authentication',
+    covers: [R_ID],
+    mermaid:
+      'stateDiagram-v2\n  [*] --> Anonymous\n  Anonymous --> Authenticated: sign in\n  Authenticated --> [*]: sign out',
+    trigger: 'One entity moves through named states.',
+    provenance: 'grounded',
+    sources: [{ kind: 'requirement', anchor: R_ID }],
+    specHash: '',
+    author: 'agent',
+    createdAt: '2026-01-02T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** The hash the fixture doc's authored diagrams must carry to read as fresh. */
+function freshDocHash(): string {
+  const doc = buildModel().docs[0];
+  assert.ok(doc, 'fixture doc exists');
+  return specHash(docStructureSource(doc));
+}
+
+test('an authored diagram renders as an inline mermaid figure with type and provenance badges', () => {
+  const diagram = authoredDiagram({ specHash: freshDocHash() });
+  const html = renderReview(reviewFile({ diagrams: [diagram] }));
+  assert.ok(
+    html.includes('<pre class="mermaid">stateDiagram-v2'),
+    'authored mermaid embedded on the same inline pre.mermaid path'
+  );
+  assert.ok(html.includes('Session lifecycle'), 'diagram title rendered as the caption');
+  assert.ok(/badge-diagram-type[^>]*>state<\/span>/.test(html), 'type badge rendered');
+  assert.ok(/badge-grounded[^>]*>grounded<\/span>/.test(html), 'provenance badge rendered');
+  assert.ok(html.includes('class="diagram diagram-authored'), 'authored figure carries its class');
+  // The diagram anchors to the doc, so it lands above the derived scenario chart.
+  const authoredAt = html.indexOf('diagram-authored');
+  const sequenceAt = html.indexOf('Happy path sequence');
+  assert.ok(authoredAt !== -1 && sequenceAt !== -1, 'both diagrams present');
+  assert.ok(authoredAt < sequenceAt, 'authored diagram sits above the derived per-scenario chart');
+  assert.ok(!/>stale<\/span>/.test(html), 'a fresh authored diagram is not marked stale');
+});
+
+test('a script payload in an authored diagram title is escaped, never emitted as live markup', () => {
+  const diagram = authoredDiagram({
+    id: 'diag_xss',
+    title: `Danger ${XSS}`,
+    specHash: freshDocHash(),
+  });
+  const html = renderReview(reviewFile({ diagrams: [diagram] }));
+  assert.ok(
+    !html.includes(`Danger ${XSS}`),
+    'the raw payload never appears live in a diagram title'
+  );
+  assert.ok(
+    html.includes('Danger &lt;script&gt;alert(1)&lt;/script&gt;'),
+    'the diagram title appears escaped'
+  );
+});
+
+test('an authored diagram whose spec hash drifted from the doc is marked stale', () => {
+  const fresh = renderReview(
+    reviewFile({ diagrams: [authoredDiagram({ specHash: freshDocHash() })] })
+  );
+  assert.ok(!/badge-stale[^>]*>stale<\/span>/.test(fresh), 'a matching doc hash is not stale');
+
+  const stale = renderReview(
+    reviewFile({ diagrams: [authoredDiagram({ specHash: 'deadbeefdeadbeef' })] })
+  );
+  assert.ok(
+    /badge-stale[^>]*>stale<\/span>/.test(stale),
+    'a drifted authored-diagram hash is marked stale'
+  );
+  assert.ok(stale.includes('diagram-authored is-stale'), 'the stale figure is flagged for styling');
+});
+
+test('a doc with only a diagram skip renders no authored-diagram block and does not throw', () => {
+  const skip: DiagramSkip = {
+    anchor: D_ID,
+    specHash: freshDocHash(),
+    reason: 'all scenarios are single-step lookups',
+    author: 'agent',
+    createdAt: '2026-01-02T00:00:00.000Z',
+  };
+  let html = '';
+  assert.doesNotThrow(() => {
+    html = renderReview(reviewFile({ diagramSkips: [skip] }));
+  }, 'a review carrying only a skip must not throw the exporter');
+  // Match the rendered figure's class attribute, not the `.diagram-authored` CSS rule.
+  assert.ok(
+    !html.includes('class="diagram diagram-authored'),
+    'no authored-diagram figure is emitted for a skip'
+  );
+});
+
+/* -------------------------------------------------------------------------- */
 /* export/notes CLI contract (touches the disk and the built CLI)             */
 /* -------------------------------------------------------------------------- */
 
@@ -336,6 +812,45 @@ test('exportTechDoc bakes open notes in by default and includeNotes:false opts o
       'appendix omitted with includeNotes:false'
     );
     assert.ok(!withoutHtml.includes('CONFIDENTIAL'), 'note body absent with includeNotes:false');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('exportTechDoc loads review.json off disk and bakes the decision ledger in', async () => {
+  const dir = await makeSeededProject();
+  try {
+    // Seed the review sidecar on disk exactly as the agent's `apply` path would.
+    const store = new ReviewStore(dir);
+    try {
+      await store.applyBatch({
+        decisions: [
+          {
+            id: 'dec_disk_1',
+            title: 'Adopt platform passkeys',
+            context: 'Phishing resistance is required.',
+            options: ['Passwords', 'Passkeys'],
+            choice: 'Use platform passkeys as the primary factor.',
+            tradeoffs: 'Devices without an authenticator need a fallback.',
+            consequence: 'Password reset can be retired.',
+            provenance: 'grounded',
+            sources: [],
+            status: 'recorded',
+            author: 'reviewer',
+            createdAt: '2026-01-02T00:00:00.000Z',
+          },
+        ],
+      });
+    } finally {
+      store.close();
+    }
+
+    const out = path.join(dir, 'review-export.html');
+    await exportTechDoc({ root: dir, out });
+    const html = await readFile(out, 'utf8');
+    assert.ok(html.includes('id="decision-ledger"'), 'ledger rendered from review.json on disk');
+    assert.ok(html.includes('Adopt platform passkeys'), 'seeded decision title present');
+    assert.ok(html.includes('1 recorded decision'), 'cover tally reflects the on-disk decision');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

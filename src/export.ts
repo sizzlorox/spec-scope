@@ -13,15 +13,31 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
-import { generateDiagrams } from './diagram.js';
+import { changeEntries } from './changes.js';
+import { generateDiagrams, requirementHeatMap } from './diagram.js';
+import { docStructureSource, requirementSource, scenarioSource, specHash } from './hash.js';
 import { NoteStore } from './notes.js';
 import { parseProject } from './parse.js';
+import { ReviewStore } from './review.js';
 import type {
+  AuthoredDiagram,
+  AuthoredDiagramType,
+  ChangeEntry,
+  Decision,
+  DeltaKind,
   Diagram,
   DiagramKind,
+  Explanation,
+  ExplanationKind,
+  GlossaryTerm,
   Note,
+  Provenance,
   Requirement,
+  ReviewFile,
+  ReviewStamp,
+  ReviewVerdict,
   Scenario,
+  SourceRef,
   SpecDoc,
   SpecGroup,
   SpecModel,
@@ -118,6 +134,98 @@ function pickDiagram(
 }
 
 /* -------------------------------------------------------------------------- */
+/* review-layer coercion                                                       */
+/*                                                                             */
+/* review.json is untrusted: a hand-edited or half-written file can reach the  */
+/* exporter with a missing field or a wrong type. `ReviewStore.load()` already */
+/* salvages it, but `renderTechDoc` may be handed a raw ReviewFile in a test,  */
+/* so every review-derived value is coerced here at the boundary — a bad field */
+/* degrades gracefully instead of throwing (`renderProse` calls `.trim()`).    */
+/* -------------------------------------------------------------------------- */
+
+const PROVENANCES: readonly Provenance[] = ['grounded', 'inferred', 'unstated'];
+const DELTAS: readonly DeltaKind[] = ['ADDED', 'MODIFIED', 'REMOVED', 'RENAMED'];
+
+/** The default review when `renderTechDoc` is called without one (the legacy 4-arg form). */
+const EMPTY_REVIEW: ReviewFile = {
+  version: 1,
+  decisions: [],
+  stamps: [],
+  explanations: [],
+  glossary: [],
+  diagrams: [],
+  diagramSkips: [],
+};
+
+/** Human-readable meaning of each provenance flag, shown as the badge tooltip. */
+const PROVENANCE_TITLE: Record<Provenance, string> = {
+  grounded: 'Restates spec or discussion text — has sources to check.',
+  inferred: "The agent's reading of the spec; a claim, shown as one.",
+  unstated: 'The spec does not state this — an open question, not a fact.',
+};
+
+const DIAGRAM_TYPES: readonly AuthoredDiagramType[] = [
+  'sequence',
+  'state',
+  'er',
+  'flowchart',
+  'class',
+];
+
+/** Badge label for each authored-diagram type ('er' reads better upper-cased). */
+const DIAGRAM_TYPE_LABEL: Record<AuthoredDiagramType, string> = {
+  sequence: 'sequence',
+  state: 'state',
+  er: 'ER',
+  flowchart: 'flowchart',
+  class: 'class',
+};
+
+/** Known type -> its badge label; an unknown (hand-edited) type falls back to its raw text. */
+function diagramTypeLabel(type: unknown): string {
+  return DIAGRAM_TYPES.includes(type as AuthoredDiagramType)
+    ? DIAGRAM_TYPE_LABEL[type as AuthoredDiagramType]
+    : str(type).trim();
+}
+
+/** Coerce any value to a string so the escaper and Marked never see a non-string. */
+function str(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function coerceProvenance(value: unknown): Provenance {
+  return PROVENANCES.includes(value as Provenance) ? (value as Provenance) : 'inferred';
+}
+
+function coerceDelta(value: unknown): DeltaKind {
+  return DELTAS.includes(value as DeltaKind) ? (value as DeltaKind) : 'MODIFIED';
+}
+
+/** Key an explanation by anchor + kind, matching how `applyBatch` upserts them. */
+function explanationKey(anchor: string, kind: ExplanationKind): string {
+  return `${anchor}\n${kind}`;
+}
+
+/**
+ * Everything the fragment renderers need to reach the review layer, threaded so
+ * a requirement can inline its summary and a doc can pick the heat map. Built
+ * once per document from the (already coerced) review arrays.
+ */
+interface RenderCtx {
+  index: Map<string, Diagram[]>;
+  /** Explanations keyed by `explanationKey(anchor, kind)`; first write wins. */
+  explanations: Map<string, Explanation>;
+  /** Agent-authored diagrams keyed by the anchor (doc/group id) they hang off. */
+  authored: Map<string, AuthoredDiagram[]>;
+  stamps: ReviewStamp[];
+  /** Tint requirement maps by verdict once any stamp exists. */
+  useHeatMap: boolean;
+}
+
+/* -------------------------------------------------------------------------- */
 /* fragment rendering                                                          */
 /* -------------------------------------------------------------------------- */
 
@@ -141,6 +249,45 @@ function renderDiagram(diagram: Diagram | undefined): string {
   ].join('\n');
 }
 
+/**
+ * A diagram the in-loop agent authored (the high-value ones), rendered like an
+ * explanation: type + provenance badges, a stale marker when the doc structure
+ * drifted under it, and the same inline `pre.mermaid` path the derived diagrams
+ * use so the offline bundle renders it.
+ *
+ * trust boundary: the title/trigger are untrusted spec-adjacent text and go
+ * through `escapeHtml`, but the Mermaid *source* is emitted as-is — it was
+ * validated by `apply`, so it is trusted the way the vendored bundles are, and
+ * gets the same `</script`-only neutralisation. That is weaker than the derived
+ * path's full escape (a hostile `</pre>` would break out), a deliberate call
+ * that rests on the apply-time validation; do not widen it here.
+ */
+function renderAuthoredDiagram(diagram: AuthoredDiagram, stale: boolean): string {
+  const typeLabel = diagramTypeLabel(diagram.type);
+  const typeBadge = typeLabel
+    ? `<span class="badge badge-diagram-type" title="Authored ${escapeHtml(
+        typeLabel
+      )} diagram">${escapeHtml(typeLabel)}</span>`
+    : '';
+  const staleBadge = stale
+    ? '<span class="badge badge-stale" title="The spec structure changed after this diagram was drawn — re-check it.">stale</span>'
+    : '';
+  const title = escapeHtml(str(diagram.title)) || '(untitled diagram)';
+  const trigger = str(diagram.trigger).trim();
+  const triggerHtml = trigger ? `<p class="diagram-trigger">${escapeHtml(trigger)}</p>` : '';
+  return [
+    `<figure class="diagram diagram-authored${stale ? ' is-stale' : ''}" id="${escapeHtml(
+      str(diagram.id)
+    )}">`,
+    `<figcaption>${typeBadge}${provenanceBadge(diagram.provenance)}${staleBadge}<span class="diagram-title">${title}</span></figcaption>`,
+    `<pre class="mermaid">${inlineScriptSource(str(diagram.mermaid))}</pre>`,
+    triggerHtml,
+    '</figure>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 function renderSteps(scenario: Scenario): string {
   if (scenario.steps.length === 0) return '';
   const items = scenario.steps.map((step) => {
@@ -155,8 +302,75 @@ function renderSteps(scenario: Scenario): string {
   return `<ol class="steps">\n${items.join('\n')}\n</ol>`;
 }
 
-function renderScenario(scenario: Scenario, index: Map<string, Diagram[]>): string {
-  const diagram = pickDiagram(index, scenario.id, 'sequence');
+/** The provenance flag as an escaped badge with an explanatory tooltip. */
+function provenanceBadge(provenance: Provenance): string {
+  const p = coerceProvenance(provenance);
+  return `<span class="badge badge-prov badge-${p}" title="${escapeHtml(
+    PROVENANCE_TITLE[p]
+  )}">${p}</span>`;
+}
+
+/** Citations back to the spec/discussion, so a reader can check the paraphrase. */
+function renderSources(sources: SourceRef[] | undefined): string {
+  const list = Array.isArray(sources) ? sources : [];
+  const items: string[] = [];
+  for (const source of list) {
+    if (source === null || typeof source !== 'object') continue;
+    const anchor = str(source.anchor).trim();
+    const kind = str(source.kind).trim() || 'ref';
+    const label = str(source.label).trim() || anchor || kind;
+    // Internal anchors only; an unresolved one is a harmless dead scroll target.
+    const link = anchor
+      ? `<a href="#${escapeHtml(anchor)}">${escapeHtml(label)}</a>`
+      : `<span>${escapeHtml(label)}</span>`;
+    const quote = str(source.quote).trim();
+    const q = quote ? `<q class="src-quote">${escapeHtml(quote)}</q>` : '';
+    items.push(
+      `<li class="source"><span class="src-kind">${escapeHtml(kind)}</span>${link}${q}</li>`
+    );
+  }
+  if (items.length === 0) return '';
+  return `<ul class="sources">\n${items.join('\n')}\n</ul>`;
+}
+
+/**
+ * A plain-language explanation shown beside the formal text. `stale` is set when
+ * the source hash no longer matches, so an out-of-date paraphrase is flagged
+ * rather than presented as current.
+ */
+function renderExplanation(explanation: Explanation, stale: boolean, variant: string): string {
+  const staleBadge = stale
+    ? '<span class="badge badge-stale" title="The spec text changed after this was written — re-check it.">stale</span>'
+    : '';
+  const body = renderProse(str(explanation.body));
+  if (!body) return '';
+  return [
+    `<div class="explanation explanation-${variant}${stale ? ' is-stale' : ''}">`,
+    `<p class="explanation-meta">${provenanceBadge(explanation.provenance)}${staleBadge}</p>`,
+    body,
+    renderSources(explanation.sources),
+    '</div>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function renderScenario(scenario: Scenario, ctx: RenderCtx): string {
+  const diagram = pickDiagram(ctx.index, scenario.id, 'sequence');
+  const narration = ctx.explanations.get(explanationKey(scenario.id, 'narration'));
+  const narrationBlock = narration
+    ? renderExplanation(
+        narration,
+        str(narration.specHash) !==
+          specHash(
+            scenarioSource(
+              scenario.name,
+              scenario.steps.map((step) => step.text)
+            )
+          ),
+        'narration'
+      )
+    : '';
   return [
     `<section class="scenario" id="${escapeHtml(scenario.id)}">`,
     `<h5 class="scenario-title">${escapeHtml(scenario.name)}</h5>`,
@@ -164,29 +378,63 @@ function renderScenario(scenario: Scenario, index: Map<string, Diagram[]>): stri
     renderSteps(scenario),
     renderDiagram(diagram),
     '</div>',
+    narrationBlock,
     '</section>',
   ]
     .filter(Boolean)
     .join('\n');
 }
 
-function renderRequirement(req: Requirement, index: Map<string, Diagram[]>): string {
+function renderRequirement(req: Requirement, ctx: RenderCtx): string {
   const badge = req.delta
     ? `<span class="badge badge-${escapeHtml(req.delta.toLowerCase())}">${escapeHtml(
         req.delta
       )}</span>`
     : '';
+  const summary = ctx.explanations.get(explanationKey(req.id, 'summary'));
+  const summaryBlock = summary
+    ? renderExplanation(
+        summary,
+        str(summary.specHash) !==
+          specHash(
+            requirementSource(
+              req.name,
+              req.text,
+              req.scenarios.map((scenario) => scenario.name)
+            )
+          ),
+        'summary'
+      )
+    : '';
   const parts = [
     `<section class="requirement" id="${escapeHtml(req.id)}">`,
     `<h4 class="requirement-title">${badge}<span>${escapeHtml(req.name)}</span></h4>`,
     renderProse(req.text),
+    summaryBlock,
   ];
-  for (const scenario of req.scenarios) parts.push(renderScenario(scenario, index));
+  for (const scenario of req.scenarios) parts.push(renderScenario(scenario, ctx));
   parts.push('</section>');
   return parts.filter(Boolean).join('\n');
 }
 
-function renderDoc(doc: SpecDoc, index: Map<string, Diagram[]>): string {
+function renderDoc(doc: SpecDoc, ctx: RenderCtx): string {
+  // When any verdict has been stamped, tint the requirement map by severity;
+  // otherwise fall back to the plain structural map.
+  // tradeoff: `useHeatMap` is a whole-review flag, so a doc with no stamps of its
+  // own still renders an all-grey heat map (losing the plain map's delta tints)
+  // once any sibling doc is stamped. Ceiling: per-doc stamp presence. Upgrade
+  // path: switch on `ctx.stamps.some((s) => anchors of this doc include s.anchor)`.
+  const map = ctx.useHeatMap
+    ? (requirementHeatMap(doc, ctx.stamps) ?? undefined)
+    : pickDiagram(ctx.index, doc.id, 'requirement-map');
+  // The agent-authored diagrams anchored to this doc, up front and staleness-
+  // checked against the doc's current structure — a DiagramSkip produces none.
+  const authored = ctx.authored.get(doc.id) ?? [];
+  let authoredBlocks: string[] = [];
+  if (authored.length > 0) {
+    const docHash = specHash(docStructureSource(doc));
+    authoredBlocks = authored.map((d) => renderAuthoredDiagram(d, str(d.specHash) !== docHash));
+  }
   const parts = [
     `<section class="doc" id="${escapeHtml(doc.id)}">`,
     `<h3 class="doc-title">${escapeHtml(doc.title)}</h3>`,
@@ -194,19 +442,20 @@ function renderDoc(doc: SpecDoc, index: Map<string, Diagram[]>): string {
       doc.kind
     )}</span><code>${escapeHtml(doc.path)}</code></p>`,
     renderProse(doc.markdown),
-    renderDiagram(pickDiagram(index, doc.id, 'requirement-map')),
-    renderDiagram(pickDiagram(index, doc.id, 'task-flow')),
+    ...authoredBlocks,
+    renderDiagram(map),
+    renderDiagram(pickDiagram(ctx.index, doc.id, 'task-flow')),
   ];
   if (doc.requirements.length > 0) {
     parts.push('<div class="requirements">');
-    for (const req of doc.requirements) parts.push(renderRequirement(req, index));
+    for (const req of doc.requirements) parts.push(renderRequirement(req, ctx));
     parts.push('</div>');
   }
   parts.push('</section>');
   return parts.filter(Boolean).join('\n');
 }
 
-function renderGroup(group: SpecGroup, docs: SpecDoc[], index: Map<string, Diagram[]>): string {
+function renderGroup(group: SpecGroup, docs: SpecDoc[], ctx: RenderCtx): string {
   const archived = group.archived ? '<span class="badge badge-archived">archived</span>' : '';
   const parts = [
     `<section class="group" id="${escapeHtml(group.id)}">`,
@@ -214,9 +463,9 @@ function renderGroup(group: SpecGroup, docs: SpecDoc[], index: Map<string, Diagr
     `<p class="group-meta"><span class="badge badge-kind">${escapeHtml(
       group.kind
     )}</span><code>${escapeHtml(group.path)}</code></p>`,
-    renderDiagram(pickDiagram(index, group.id, 'overview')),
+    renderDiagram(pickDiagram(ctx.index, group.id, 'overview')),
   ];
-  for (const doc of docs) parts.push(renderDoc(doc, index));
+  for (const doc of docs) parts.push(renderDoc(doc, ctx));
   parts.push('</section>');
   return parts.filter(Boolean).join('\n');
 }
@@ -301,6 +550,222 @@ function renderNotesAppendix(notes: Note[]): string {
     '<section class="appendix" id="appendix-notes">',
     `<h2>Open discussion notes <span class="count">${open.length}</span></h2>`,
     ...blocks,
+    '</section>',
+  ].join('\n');
+}
+
+/* -------------------------------------------------------------------------- */
+/* review-layer sections                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The plain-language lead: a short prose briefing stitched from the `summary`
+ * explanations. Omitted entirely when none exist, so a spec with no summaries
+ * never grows an empty section. The per-requirement summaries (badged and
+ * staleness-checked) still appear inline in the body — this is the digest.
+ */
+function renderOverview(explanations: Explanation[]): string {
+  // `unstated` summaries are honest gaps, not statements of fact: they belong in
+  // Open questions (badged), never in the plain-prose lead where the badge is lost.
+  const summaries = explanations.filter(
+    (e) =>
+      e.kind === 'summary' && coerceProvenance(e.provenance) !== 'unstated' && str(e.body).trim()
+  );
+  if (summaries.length === 0) return '';
+  const blocks = summaries.map((e) => {
+    const anchor = str(e.anchor).trim();
+    const label = str(e.anchorLabel).trim();
+    const lead =
+      label && anchor
+        ? `<p class="overview-lead"><a href="#${escapeHtml(anchor)}">${escapeHtml(label)}</a></p>`
+        : label
+          ? `<p class="overview-lead">${escapeHtml(label)}</p>`
+          : '';
+    return `<div class="overview-item">${lead}${renderProse(str(e.body))}</div>`;
+  });
+  return [
+    '<section class="overview" id="overview">',
+    '<h2>Overview</h2>',
+    ...blocks,
+    '</section>',
+  ].join('\n');
+}
+
+/** One recorded decision: its receipt, provenance-badged, with source links. */
+function renderDecision(decision: Decision): string {
+  const title = escapeHtml(str(decision.title)) || '(untitled decision)';
+  const rows: string[] = [];
+  const prose = (label: string, value: unknown): void => {
+    const html = renderProse(str(value));
+    if (html) rows.push(`<div class="decision-field"><dt>${label}</dt><dd>${html}</dd></div>`);
+  };
+
+  prose('Context', decision.context);
+
+  const options = Array.isArray(decision.options) ? decision.options : [];
+  const optionItems = options
+    .map((option) => str(option).trim())
+    .filter((option) => option.length > 0)
+    .map((option) => `<li>${escapeHtml(option)}</li>`);
+  if (optionItems.length > 0) {
+    rows.push(
+      `<div class="decision-field"><dt>Options</dt><dd><ul class="options">${optionItems.join(
+        ''
+      )}</ul></dd></div>`
+    );
+  }
+
+  prose('Choice', decision.choice);
+  prose('Tradeoffs', decision.tradeoffs);
+  prose('Consequence', decision.consequence);
+
+  return [
+    `<article class="decision" id="decision-${escapeHtml(str(decision.id))}">`,
+    `<h3 class="decision-title">${provenanceBadge(decision.provenance)}<span>${title}</span></h3>`,
+    rows.length > 0 ? `<dl class="decision-body">\n${rows.join('\n')}\n</dl>` : '',
+    renderSources(decision.sources),
+    '</article>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * The Decision Ledger: every *recorded* decision. Open decisions are still under
+ * debate and superseded ones are history, so neither belongs in the finalized
+ * story; both are excluded here (open ones surface via their discussion notes).
+ */
+function renderDecisionLedger(decisions: Decision[]): string {
+  const recorded = decisions.filter((d) => d.status === 'recorded');
+  if (recorded.length === 0) return '';
+  return [
+    '<section class="appendix decisions" id="decision-ledger">',
+    `<h2>Decision ledger <span class="count">${recorded.length}</span></h2>`,
+    ...recorded.map(renderDecision),
+    '</section>',
+  ].join('\n');
+}
+
+/**
+ * The honest gaps, gathered in one place: `blocking`/`concern` verdicts, the
+ * `unstated` explanations (where the agent refused to invent a rationale), and
+ * every glossary term the spec uses but never defines. Each is framed as an open
+ * question, never a fabricated answer. Omitted when there is nothing to raise.
+ */
+function renderOpenQuestions(
+  explanations: Explanation[],
+  glossary: GlossaryTerm[],
+  stamps: ReviewStamp[]
+): string {
+  const flagged = stamps
+    .filter((s) => s.verdict === 'blocking' || s.verdict === 'concern')
+    .sort((a, b) => (a.verdict === b.verdict ? 0 : a.verdict === 'blocking' ? -1 : 1));
+  const unstated = explanations.filter((e) => coerceProvenance(e.provenance) === 'unstated');
+  const undefinedTerms = glossary.filter((g) => g.defined === false && str(g.term).trim());
+
+  if (flagged.length + unstated.length + undefinedTerms.length === 0) return '';
+
+  const items: string[] = [];
+
+  for (const stamp of flagged) {
+    const verdict: ReviewVerdict = stamp.verdict === 'blocking' ? 'blocking' : 'concern';
+    const anchor = str(stamp.anchor).trim();
+    const label = str(stamp.anchorLabel).trim() || anchor || '(unlabelled)';
+    const link = anchor
+      ? `<a href="#${escapeHtml(anchor)}">${escapeHtml(label)}</a>`
+      : `<span>${escapeHtml(label)}</span>`;
+    const note = str(stamp.note).trim();
+    const noteHtml = note ? renderProse(note) : '';
+    items.push(
+      `<li class="oq oq-${verdict}"><span class="badge badge-${verdict}">${verdict}</span>${link}${noteHtml}</li>`
+    );
+  }
+
+  for (const e of unstated) {
+    const anchor = str(e.anchor).trim();
+    const label = str(e.anchorLabel).trim();
+    const head = anchor
+      ? `<a href="#${escapeHtml(anchor)}">${escapeHtml(label || anchor)}</a>`
+      : label
+        ? `<span>${escapeHtml(label)}</span>`
+        : '';
+    items.push(
+      `<li class="oq oq-unstated"><span class="badge badge-unstated">unstated</span>${head}${renderProse(
+        str(e.body)
+      )}</li>`
+    );
+  }
+
+  for (const term of undefinedTerms) {
+    items.push(
+      `<li class="oq oq-term"><span class="badge badge-unstated">undefined term</span><strong>${escapeHtml(
+        str(term.term)
+      )}</strong> — used in the spec but never defined.</li>`
+    );
+  }
+
+  return [
+    '<section class="appendix open-questions" id="open-questions">',
+    `<h2>Open questions <span class="count">${items.length}</span></h2>`,
+    `<ul class="oq-list">\n${items.join('\n')}\n</ul>`,
+    '</section>',
+  ].join('\n');
+}
+
+/** The Changes appendix: one entry per delta, with the before/after quoted verbatim. */
+function renderChangeEntry(change: ChangeEntry): string {
+  const delta = coerceDelta(change.delta);
+  const badge = `<span class="badge badge-${delta.toLowerCase()}">${delta}</span>`;
+  const anchor = str(change.anchor).trim();
+  const name = escapeHtml(str(change.requirement)) || '(unnamed requirement)';
+  const heading = anchor ? `<a href="#${escapeHtml(anchor)}">${name}</a>` : `<span>${name}</span>`;
+  const quote = (label: string, value: unknown): string => {
+    const text = str(value).trim();
+    return text
+      ? `<div class="change-side"><h4>${label}</h4><blockquote class="change-quote">${escapeHtml(
+          text
+        )}</blockquote></div>`
+      : '';
+  };
+  return [
+    `<article class="change" id="change-${escapeHtml(anchor)}">`,
+    `<h3 class="change-title">${badge}${heading}</h3>`,
+    `<p class="change-summary">${escapeHtml(str(change.summary))}</p>`,
+    quote('Before', change.before),
+    quote('After', change.after),
+    '</article>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function renderChangesAppendix(changes: ChangeEntry[]): string {
+  if (changes.length === 0) return '';
+  return [
+    '<section class="appendix changes-appendix" id="appendix-changes">',
+    `<h2>Changes <span class="count">${changes.length}</span></h2>`,
+    ...changes.map(renderChangeEntry),
+    '</section>',
+  ].join('\n');
+}
+
+/** The Glossary appendix: defined terms only — undefined ones are open questions. */
+function renderGlossaryAppendix(glossary: GlossaryTerm[]): string {
+  const defined = glossary.filter((g) => g.defined !== false && str(g.term).trim());
+  if (defined.length === 0) return '';
+  const items = defined.map((term) => {
+    const definition = renderProse(str(term.definition));
+    return [
+      `<div class="glossary-term" id="term-${escapeHtml(str(term.id))}">`,
+      `<dt>${escapeHtml(str(term.term))}${provenanceBadge(term.provenance)}</dt>`,
+      `<dd>${definition}${renderSources(term.sources)}</dd>`,
+      '</div>',
+    ].join('\n');
+  });
+  return [
+    '<section class="appendix glossary" id="appendix-glossary">',
+    `<h2>Glossary <span class="count">${defined.length}</span></h2>`,
+    `<dl class="glossary-list">\n${items.join('\n')}\n</dl>`,
     '</section>',
   ].join('\n');
 }
@@ -420,6 +885,60 @@ nav.toc a:hover { text-decoration: underline; }
 .badge-change { color: var(--modified); }
 .badge-resolve { color: var(--added); }
 
+/* Provenance: grounded = has receipts, inferred = a claim, unstated = a gap. */
+.badge-grounded { color: var(--added); }
+.badge-inferred { color: var(--accent); }
+.badge-unstated { color: var(--removed); }
+.badge-stale { color: var(--modified); }
+.badge-understood { color: var(--accent); }
+.badge-approved { color: var(--added); }
+.badge-concern { color: var(--modified); }
+.badge-blocking { color: var(--removed); }
+
+.review-tally { margin: 1rem 0 0; color: var(--fg-muted); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+
+.overview .overview-item { margin: 1rem 0; }
+.overview-lead { margin: 0 0 0.25rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.overview-lead a { color: var(--fg-muted); text-decoration: none; }
+
+/* The plain-language companion beside a requirement/scenario. */
+.explanation { margin: 0.75rem 0; padding: 0.6rem 0.85rem; background: var(--bg-soft); border: 1px solid var(--border); border-left-width: 3px; border-radius: 8px; }
+.explanation.is-stale { border-left-color: var(--modified); }
+.explanation-meta { margin: 0 0 0.4rem; }
+.explanation .prose > :first-child { margin-top: 0; }
+
+.decision { margin: 1.25rem 0; padding: 0.85rem 1rem; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px; }
+.decision-title { margin: 0 0 0.5rem; font-size: 1.1rem; }
+.decision-body { margin: 0; display: grid; gap: 0.5rem; }
+.decision-field { margin: 0; }
+.decision-field dt { font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+.decision-field dd { margin: 0.1rem 0 0; }
+.options { margin: 0.1rem 0 0; padding-left: 1.25rem; }
+
+.sources { list-style: none; margin: 0.5rem 0 0; padding: 0; font-size: 0.85rem; }
+.source { margin: 0.2rem 0; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: baseline; }
+.src-kind { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+.src-quote { color: var(--fg-muted); font-style: italic; }
+
+.oq-list { list-style: none; margin: 0; padding: 0; }
+.oq { margin: 0.6rem 0; padding: 0.5rem 0.75rem; background: var(--bg-soft); border: 1px solid var(--border); border-left-width: 3px; border-radius: 8px; }
+.oq-blocking { border-left-color: var(--removed); }
+.oq-concern { border-left-color: var(--modified); }
+.oq-unstated, .oq-term { border-left-color: var(--accent); }
+.oq .prose { margin-top: 0.3rem; }
+
+.change { margin: 1.25rem 0; }
+.change-title { font-size: 1.1rem; }
+.change-summary { color: var(--fg-muted); margin: 0.25rem 0; }
+.change-side { margin: 0.5rem 0; }
+.change-side h4 { margin: 0 0 0.2rem; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+.change-quote { margin: 0; padding: 0.5rem 0.75rem; background: var(--bg-code); border-left: 3px solid var(--border); border-radius: 4px; white-space: pre-wrap; }
+
+.glossary-list { margin: 0; }
+.glossary-term { margin: 0.9rem 0; }
+.glossary-term dt { font-weight: 600; }
+.glossary-term dd { margin: 0.2rem 0 0; }
+
 .doc-meta, .group-meta { margin: 0 0 1rem; color: var(--fg-muted); font-size: 0.9rem; }
 .requirement { margin: 1.5rem 0; padding-left: 1rem; border-left: 3px solid var(--border); }
 .scenario { margin: 1rem 0; }
@@ -438,6 +957,14 @@ nav.toc a:hover { text-decoration: underline; }
 
 figure.diagram { margin: 1rem 0; padding: 0.75rem; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px; }
 figure.diagram figcaption { margin-bottom: 0.5rem; font-size: 0.8rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* The agent-authored diagrams: accent-flagged, title left readable (not uppercased). */
+figure.diagram.diagram-authored { border-left: 3px solid var(--accent); }
+figure.diagram.diagram-authored.is-stale { border-left-color: var(--modified); }
+.diagram-authored figcaption { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: baseline; text-transform: none; letter-spacing: normal; }
+.diagram-authored .diagram-title { font-weight: 600; color: var(--fg); }
+.badge-diagram-type { color: var(--accent); }
+.diagram-trigger { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--fg-muted); }
 pre.mermaid { background: none; padding: 0; margin: 0; overflow-x: auto; text-align: center; white-space: pre; }
 pre.mermaid svg { max-width: 100%; height: auto; }
 
@@ -467,7 +994,8 @@ pre.mermaid svg { max-width: 100%; height: auto; }
   .prose a[href^="http"]::after { content: ' (' attr(href) ')'; font-size: 0.85em; color: #444; word-break: break-all; }
   .group { break-before: page; page-break-before: always; }
   .group:first-of-type { break-before: auto; page-break-before: auto; }
-  figure.diagram, .scenario, .requirement, .note, .stats li, pre { break-inside: avoid; page-break-inside: avoid; }
+  figure.diagram, .scenario, .requirement, .note, .stats li, pre,
+  .decision, .change, .explanation, .oq, .glossary-term { break-inside: avoid; page-break-inside: avoid; }
   h1, h2, h3, h4, h5 { break-after: avoid; page-break-after: avoid; }
   nav.toc { break-after: page; page-break-after: always; }
 }
@@ -573,12 +1101,55 @@ export function renderTechDoc(
   model: SpecModel,
   diagrams: Diagram[],
   notes: Note[],
-  vendor: { mermaid: string; marked: string }
+  vendor: { mermaid: string; marked: string },
+  review: ReviewFile = EMPTY_REVIEW,
+  changes: ChangeEntry[] = []
 ): string {
   const project = basename(model.root) || 'spec-scope';
   const counts = countModel(model);
   const index = indexDiagrams(diagrams);
   const docsById = new Map(model.docs.map((doc) => [doc.id, doc]));
+
+  // review.json is untrusted: guard the whole object and every array so a
+  // hand-edited file with a missing field renders a degraded section, not a throw.
+  const safeReview = review && typeof review === 'object' ? review : EMPTY_REVIEW;
+  const decisions = Array.isArray(safeReview.decisions) ? safeReview.decisions : [];
+  const stamps = Array.isArray(safeReview.stamps) ? safeReview.stamps : [];
+  const explanations = Array.isArray(safeReview.explanations) ? safeReview.explanations : [];
+  const glossary = Array.isArray(safeReview.glossary) ? safeReview.glossary : [];
+  // Authored diagrams and "no diagram" skips ride in on the same review object;
+  // skips need no rendering (they simply mean this doc gets no authored block).
+  const authoredDiagrams = Array.isArray(safeReview.diagrams) ? safeReview.diagrams : [];
+  const changeList = Array.isArray(changes) ? changes : [];
+
+  // Explanations keyed by anchor + kind for O(1) inline lookup; first write wins.
+  const explanationsByKey = new Map<string, Explanation>();
+  for (const explanation of explanations) {
+    if (explanation === null || typeof explanation !== 'object') continue;
+    const kind = explanation.kind;
+    if (kind !== 'summary' && kind !== 'narration' && kind !== 'glossary-def') continue;
+    const key = explanationKey(str(explanation.anchor), kind);
+    if (!explanationsByKey.has(key)) explanationsByKey.set(key, explanation);
+  }
+
+  // Authored diagrams keyed by the anchor (doc/group id) they hang off.
+  const authoredByAnchor = new Map<string, AuthoredDiagram[]>();
+  for (const diagram of authoredDiagrams) {
+    if (diagram === null || typeof diagram !== 'object') continue;
+    const anchor = str(diagram.anchor).trim();
+    if (!anchor) continue;
+    const bucket = authoredByAnchor.get(anchor);
+    if (bucket) bucket.push(diagram);
+    else authoredByAnchor.set(anchor, [diagram]);
+  }
+
+  const ctx: RenderCtx = {
+    index,
+    explanations: explanationsByKey,
+    authored: authoredByAnchor,
+    stamps,
+    useHeatMap: stamps.length > 0,
+  };
 
   const docsForGroup = (group: SpecGroup): SpecDoc[] => {
     const out: SpecDoc[] = [];
@@ -595,12 +1166,30 @@ export function renderTechDoc(
   }
   const orphans = model.docs.filter((doc) => !claimed.has(doc.id));
 
+  // Review-layer sections, each self-omitting when empty so nothing hollow ships.
+  const overviewSection = renderOverview(explanations);
+  const ledgerSection = renderDecisionLedger(decisions);
+  const openQuestionsSection = renderOpenQuestions(explanations, glossary, stamps);
+  const changesSection = renderChangesAppendix(changeList);
+  const glossarySection = renderGlossaryAppendix(glossary);
+  const notesAppendix = renderNotesAppendix(notes);
+
   const tocItems: string[] = [];
   const bodyItems: string[] = [];
+
+  // Front matter, in document order, each entry emitted only alongside its section.
+  if (overviewSection) tocItems.push('<li class="toc-group"><a href="#overview">Overview</a></li>');
+  if (ledgerSection) {
+    tocItems.push('<li class="toc-group"><a href="#decision-ledger">Decision ledger</a></li>');
+  }
+  if (openQuestionsSection) {
+    tocItems.push('<li class="toc-group"><a href="#open-questions">Open questions</a></li>');
+  }
+
   for (const group of model.groups) {
     const docs = docsForGroup(group);
     tocItems.push(tocEntry(group.id, group.name, 'toc-group', tocForDocs(docs)));
-    bodyItems.push(renderGroup(group, docs, index));
+    bodyItems.push(renderGroup(group, docs, ctx));
   }
   if (orphans.length > 0) {
     // Docs no group claimed still have to be reachable from the contents.
@@ -613,16 +1202,30 @@ export function renderTechDoc(
       [
         '<section class="group" id="ungrouped">',
         '<h2 class="group-title">Ungrouped documents</h2>',
-        ...orphans.map((doc) => renderDoc(doc, index)),
+        ...orphans.map((doc) => renderDoc(doc, ctx)),
         '</section>',
       ].join('\n')
     );
   }
 
-  const appendix = renderNotesAppendix(notes);
-  if (appendix) {
+  // Appendices, again only linked when present.
+  if (changesSection)
+    tocItems.push('<li class="toc-group"><a href="#appendix-changes">Changes</a></li>');
+  if (glossarySection) {
+    tocItems.push('<li class="toc-group"><a href="#appendix-glossary">Glossary</a></li>');
+  }
+  if (notesAppendix) {
     tocItems.push('<li class="toc-group"><a href="#appendix-notes">Open discussion notes</a></li>');
   }
+
+  const recordedDecisions = decisions.filter((d) => d != null && d.status === 'recorded').length;
+  const openQuestionCount =
+    explanations.filter((e) => e != null && coerceProvenance(e.provenance) === 'unstated').length +
+    glossary.filter((g) => g != null && g.defined === false).length +
+    stamps.filter((s) => s != null && (s.verdict === 'blocking' || s.verdict === 'concern')).length;
+  const reviewTally = `<p class="review-tally">${openQuestionCount} open question${
+    openQuestionCount === 1 ? '' : 's'
+  } · ${recordedDecisions} recorded decision${recordedDecisions === 1 ? '' : 's'}</p>`;
 
   const warnings =
     model.warnings.length > 0
@@ -672,14 +1275,20 @@ export function renderTechDoc(
     stat(counts.scenarios, 'scenarios'),
     stat(`${counts.tasksDone}/${counts.tasksTotal}`, 'tasks done'),
     '</ul>',
+    reviewTally,
     warnings,
     '</section>',
     '<nav class="toc" id="toc">',
     '<h2>Contents</h2>',
     tocItems.length > 0 ? `<ul>\n${tocItems.join('\n')}\n</ul>` : '<p>No specifications found.</p>',
     '</nav>',
+    overviewSection,
+    ledgerSection,
+    openQuestionsSection,
     ...bodyItems,
-    appendix,
+    changesSection,
+    glossarySection,
+    notesAppendix,
     '<p class="toplink"><a href="#top">Back to top</a></p>',
     '</div>',
     `<script>${inlineScriptSource(vendor.mermaid)}</script>`,
@@ -714,8 +1323,19 @@ export async function exportTechDoc(opts: ExportOptions): Promise<string> {
     }
   }
 
+  // The review sidecar loads leniently: a missing file is an empty review, a
+  // corrupt one is quarantined, so an export never fails on the review layer.
+  const reviewStore = new ReviewStore(model.root);
+  let review: ReviewFile;
+  try {
+    review = await reviewStore.load();
+  } finally {
+    reviewStore.close();
+  }
+  const changes = changeEntries(model);
+
   const [mermaid, marked] = await Promise.all([readVendor('mermaid'), readVendor('marked')]);
-  const html = renderTechDoc(model, diagrams, notes, { mermaid, marked });
+  const html = renderTechDoc(model, diagrams, notes, { mermaid, marked }, review, changes);
 
   const project = basename(model.root) || 'spec-scope';
   const target = opts.out

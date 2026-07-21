@@ -153,3 +153,244 @@ export interface NotesFile {
   version: 1;
   notes: Note[];
 }
+
+/* -------------------------------------------------------------------------- */
+/* Review layer                                                                */
+/*                                                                             */
+/* Everything below is *derived* from the spec plus the discussion — plain    */
+/* explanations, captured decisions, review verdicts, a glossary. spec-scope  */
+/* has no LLM of its own; the in-loop agent produces the prose (via           */
+/* `spec-scope explain`/`apply`) and the tool renders it. The provenance flag */
+/* keeps that honest: nothing invented is ever shown as fact.                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Where a piece of explanation stands relative to the source.
+ * - `grounded`  — restates spec text or a discussion thread (has `sources`).
+ * - `inferred`  — the agent's reading; a claim, shown as one, disputable.
+ * - `unstated`  — the honest gap; the UI turns this into an open question.
+ */
+export type Provenance = 'grounded' | 'inferred' | 'unstated';
+
+/** A citation back to the material that grounds an explanation or decision. */
+export interface SourceRef {
+  kind: 'requirement' | 'scenario' | 'doc' | 'task' | 'note' | 'constitution';
+  /** Id of the referenced thing (or a free label for a constitution clause). */
+  anchor: string;
+  label?: string;
+  /** The exact fragment quoted, so a reader can check the paraphrase. */
+  quote?: string;
+}
+
+export type ExplanationKind = 'summary' | 'narration' | 'glossary-def';
+
+/**
+ * A plain-language companion for a requirement or scenario (or a glossary
+ * definition). Rendered beside the formal text, never replacing it.
+ */
+export interface Explanation {
+  id: string;
+  /** `Requirement.id`, `Scenario.id`, or a glossary term slug. */
+  anchor: string;
+  anchorLabel: string;
+  kind: ExplanationKind;
+  body: string;
+  provenance: Provenance;
+  sources: SourceRef[];
+  /**
+   * Hash of the source text this explains, at the time it was written. When it
+   * no longer matches the current text, the explanation is shown as stale
+   * rather than quietly lying. See `specHash` in `src/hash.ts`.
+   */
+  specHash: string;
+  author: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+}
+
+export type DecisionStatus = 'open' | 'recorded' | 'superseded';
+
+/**
+ * A captured decision: what was chosen, what was traded away, and the receipt.
+ * Born from a resolved discussion thread (`threadNoteId`) or swept from the spec.
+ */
+export interface Decision {
+  id: string;
+  title: string;
+  context: string;
+  /** Alternatives that were on the table; may be empty. */
+  options: string[];
+  choice: string;
+  /** What accepting this choice gives up. */
+  tradeoffs: string;
+  consequence: string;
+  provenance: Provenance;
+  sources: SourceRef[];
+  /** The resolved `Note.id` this was distilled from, when applicable. */
+  threadNoteId?: string;
+  status: DecisionStatus;
+  author: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** A reviewer's verdict on one requirement/scenario — the heat-map input. */
+export type ReviewVerdict = 'understood' | 'concern' | 'blocking' | 'approved';
+
+export interface ReviewStamp {
+  id: string;
+  anchor: string;
+  anchorLabel: string;
+  verdict: ReviewVerdict;
+  note?: string;
+  author: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+}
+
+/** A domain term with its definition, or flagged as used-but-undefined. */
+export interface GlossaryTerm {
+  id: string;
+  term: string;
+  /** Empty when `defined` is false. */
+  definition: string;
+  provenance: Provenance;
+  sources: SourceRef[];
+  /** False = the spec uses this term but never defines it -> open question. */
+  defined: boolean;
+  author: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+}
+
+/**
+ * Diagram types the agent authors when a structure warrants one. Distinct from
+ * the code-`derived` {@link DiagramKind}: these require judgement about what the
+ * spec means, which only the in-loop agent has.
+ *
+ * - `sequence`  — an interaction/endpoint lifecycle across ≥2 participants.
+ * - `state`     — one entity moving through named states (draft → published → …).
+ * - `er`        — a data model: entities and their relationships.
+ * - `flowchart` — a process with branching or a decision flow.
+ * - `class`     — module/component structure within one unit.
+ */
+export type AuthoredDiagramType = 'sequence' | 'state' | 'er' | 'flowchart' | 'class';
+
+/**
+ * A diagram the agent authored because a spec structure earned one — the right
+ * type at the right altitude (one state machine per entity, one ER for the data
+ * model), not a per-scenario reflex. Stored in `review.json` and rendered like an
+ * explanation, with the same provenance and staleness discipline.
+ */
+export interface AuthoredDiagram {
+  id: string;
+  title: string;
+  type: AuthoredDiagramType;
+  /** The primary anchor it hangs off — usually a `SpecDoc.id` or `SpecGroup.id`. */
+  anchor: string;
+  anchorLabel: string;
+  /** The anchors this diagram consolidates (requirements/scenarios/entities it spans). */
+  covers: string[];
+  /** Mermaid source authored by the agent. Validated on `apply`. */
+  mermaid: string;
+  /** Which signal made this diagram worth drawing — for trust and for tuning. */
+  trigger: string;
+  provenance: Provenance;
+  sources: SourceRef[];
+  /** Hash of the covered structural text; drives staleness like an explanation. */
+  specHash: string;
+  author: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+}
+
+/**
+ * A record that the agent reviewed a document for diagram-worthy structure and
+ * judged that **none** was warranted — so `explain` stops asking. Prose is the
+ * honest default; this makes "no diagram" an explicit, staleness-tracked decision
+ * rather than an omission.
+ */
+export interface DiagramSkip {
+  /** The `SpecDoc.id` (or group id) reviewed. */
+  anchor: string;
+  /** Hash of the doc's structural text at review time; a change re-opens the task. */
+  specHash: string;
+  /** Optional one-line reason ("all scenarios are single-step lookups"). */
+  reason?: string;
+  author: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+}
+
+/** On-disk shape of `.spec-scope/review.json`. */
+export interface ReviewFile {
+  version: 1;
+  decisions: Decision[];
+  stamps: ReviewStamp[];
+  explanations: Explanation[];
+  glossary: GlossaryTerm[];
+  diagrams: AuthoredDiagram[];
+  diagramSkips: DiagramSkip[];
+}
+
+/** One edge of a blast-radius subgraph. */
+export interface BlastEdge {
+  from: string;
+  to: string;
+  /** `structural` = a real model edge; `inferred` = shared-term guess (dashed). */
+  kind: 'structural' | 'inferred';
+  reason?: string;
+}
+
+export interface BlastNode {
+  id: string;
+  label: string;
+  type: 'requirement' | 'scenario' | 'task' | 'doc' | 'constitution';
+}
+
+/** What a change to one requirement reaches downstream. */
+export interface BlastGraph {
+  root: string;
+  nodes: BlastNode[];
+  edges: BlastEdge[];
+}
+
+/** A spec change, rendered from an OpenSpec delta marker, with receipts. */
+export interface ChangeEntry {
+  anchor: string;
+  requirement: string;
+  delta: DeltaKind;
+  /** Mechanical prose — never stands alone; carries the quoted fragments. */
+  summary: string;
+  before?: string;
+  after?: string;
+}
+
+/** One unit of work in the list `spec-scope explain` hands the in-loop agent. */
+export interface ExplainTask {
+  kind: 'summary' | 'narration' | 'glossary' | 'decision' | 'diagram';
+  anchor: string;
+  anchorLabel: string;
+  /** `missing` = never explained; `stale` = the spec changed under it. */
+  reason: 'missing' | 'stale';
+  /**
+   * For `summary`/`narration` tasks, the hash of the current source text; for a
+   * `diagram` task, the hash of the doc's structural text. The agent copies this
+   * verbatim into the `specHash` of the explanation / authored diagram / skip it
+   * writes, so the result matches the spec and is not reported stale next run.
+   * Empty for `glossary`/`decision` tasks, which pin to no source text.
+   */
+  specHash: string;
+  /** What to produce and the provenance / worthiness rule to follow. */
+  hint: string;
+}
+
+/** Batch the agent hands back via `spec-scope apply` after generating content. */
+export interface ReviewBatch {
+  explanations?: Explanation[];
+  decisions?: Decision[];
+  glossary?: GlossaryTerm[];
+  diagrams?: AuthoredDiagram[];
+  diagramSkips?: DiagramSkip[];
+}

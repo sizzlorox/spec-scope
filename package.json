@@ -26,6 +26,7 @@
     "bin",
     "dist/src",
     "web",
+    "skills",
     "README.md",
     "LICENSE"
   ],

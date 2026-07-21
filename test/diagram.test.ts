@@ -2,17 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  blastDiagram,
   escapeMermaid,
   generateDiagrams,
   groupOverview,
+  requirementHeatMap,
   requirementMap,
   scenarioSequence,
   taskFlow,
+  validateAuthoredMermaid,
 } from '../src/diagram.js';
 import type {
+  BlastEdge,
+  BlastGraph,
+  BlastNode,
   DeltaKind,
   Diagram,
   Requirement,
+  ReviewStamp,
+  ReviewVerdict,
   Scenario,
   SpecDoc,
   SpecFlavor,
@@ -76,6 +84,34 @@ function model(
   flavor: SpecFlavor = 'openspec'
 ): SpecModel {
   return { root: '/tmp/project', flavor, groups, docs, warnings: [] };
+}
+
+function stamp(
+  anchor: string,
+  verdict: ReviewVerdict,
+  extra: Partial<ReviewStamp> = {}
+): ReviewStamp {
+  return {
+    id: `stamp:${anchor}:${verdict}`,
+    anchor,
+    anchorLabel: anchor,
+    verdict,
+    author: 'rev',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...extra,
+  };
+}
+
+function bnode(id: string, type: BlastNode['type'], label = id): BlastNode {
+  return { id, label, type };
+}
+
+function bedge(from: string, to: string, kind: BlastEdge['kind']): BlastEdge {
+  return { from, to, kind };
+}
+
+function bgraph(root: string, nodes: BlastNode[], edges: BlastEdge[] = []): BlastGraph {
+  return { root, nodes, edges };
 }
 
 /** Lines of a diagram with Mermaid comments and blanks removed. */
@@ -624,7 +660,10 @@ test('groupOverview badges nodes with requirement and task counts', () => {
 test('generateDiagrams emits overviews, then maps, then task flows, then sequences', () => {
   const specDoc = doc('doc:spec', 'Spec', {
     kind: 'spec',
-    requirements: [requirement('Login', [scenario('happy')])],
+    // Two message arrows so the sequence clears the derived-noise floor.
+    requirements: [
+      requirement('Login', [scenario('happy', [step('WHEN', 'x'), step('THEN', 'y')])]),
+    ],
   });
   const tasksDoc = doc('doc:tasks', 'Tasks', { kind: 'tasks', tasks: [task('a', { id: 't1' })] });
   const g = group('group:g', 'Add auth', ['doc:spec', 'doc:tasks']);
@@ -654,7 +693,8 @@ test('generateDiagrams produces unique ids even when anchors slug to the same va
 });
 
 test('generateDiagrams anchors every diagram at the object it describes', () => {
-  const scn = scenario('happy', [step('WHEN', 'x')], 'scn:happy');
+  // Two message arrows so the sequence clears the derived-noise floor.
+  const scn = scenario('happy', [step('WHEN', 'x'), step('THEN', 'y')], 'scn:happy');
   const req = requirement('Login', [scn], undefined, 'req:login');
   const d = doc('doc:spec', 'Spec', { requirements: [req], tasks: [task('a', { id: 't1' })] });
   const byKind = new Map(generateDiagrams(model([d])).map((x) => [x.kind, x]));
@@ -664,13 +704,39 @@ test('generateDiagrams anchors every diagram at the object it describes', () => 
   assert.equal(byKind.get('sequence')?.anchor, 'scn:happy');
 });
 
+test('generateDiagrams suppresses a sequence for a <2-message scenario but keeps a real one', () => {
+  // A GIVEN-only precondition renders zero arrows; a single lone WHEN renders one —
+  // neither is worth a chart. Only the WHEN/THEN scenario clears the 2-arrow floor.
+  const givenOnly = scenario(
+    'setup',
+    [step('GIVEN', 'a user exists'), step('AND', 'is admin')],
+    'scn:given'
+  );
+  const loneWhen = scenario('poke', [step('WHEN', 'acts')], 'scn:lone');
+  const real = scenario('exchange', [step('WHEN', 'asks'), step('THEN', 'answers')], 'scn:real');
+  const d = doc('doc:spec', 'Spec', {
+    requirements: [requirement('R', [givenOnly, loneWhen, real], undefined, 'req:r')],
+  });
+
+  const seqAnchors = generateDiagrams(model([d]))
+    .filter((x) => x.kind === 'sequence')
+    .map((x) => x.anchor);
+  assert.deepEqual(seqAnchors, ['scn:real'], 'only the multi-message scenario draws a sequence');
+});
+
 // ---------------------------------------------------------------------------
 // hostile input + structural sanity
 // ---------------------------------------------------------------------------
 
 test('hostile requirement and scenario names round-trip into intact Mermaid', () => {
   const nasty = 'He said "stop" #now\n[urgent] (really) {json} 50% `code`; end';
-  const scn = scenario(nasty, [step('WHEN', nasty, nasty)], 'scn:nasty');
+  // Two message steps so the sequence survives the derived-noise floor and its
+  // escaping is exercised alongside the map/overview/task-flow diagrams below.
+  const scn = scenario(
+    nasty,
+    [step('WHEN', nasty, nasty), step('THEN', nasty, nasty)],
+    'scn:nasty'
+  );
   const req = requirement(nasty, [scn], 'ADDED', 'req:nasty');
   const d = doc('doc:nasty', nasty, {
     requirements: [req],
@@ -748,4 +814,277 @@ test('every emitted diagram starts with a valid Mermaid header after its comment
       assert.ok(line.trim().startsWith('%%'), `non-comment preamble in ${diagram.id}: ${line}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// requirementHeatMap
+// ---------------------------------------------------------------------------
+
+test('requirementHeatMap returns null when the doc has no requirements', () => {
+  assert.equal(requirementHeatMap(doc('doc:a', 'A'), []), null);
+});
+
+test('requirementHeatMap id and title differ from the plain requirement map', () => {
+  const d = doc('doc:a', 'Auth', { requirements: [requirement('Login')] });
+  const plain = requirementMap(d);
+  const heat = requirementHeatMap(d, []);
+  assert.ok(plain && heat);
+  assert.notEqual(plain.id, heat.id);
+  assert.notEqual(plain.title, heat.title);
+  // The kind is reused (the union is fixed) but the anchor is disambiguated.
+  assert.equal(heat.kind, 'requirement-map');
+  assert.notEqual(plain.anchor, heat.anchor);
+});
+
+test('requirementHeatMap tints a requirement by the worst verdict on it or its scenarios', () => {
+  const happy = scenario('happy', [], 'scn:happy');
+  const sad = scenario('sad', [], 'scn:sad');
+  const req = requirement('Login', [happy, sad], undefined, 'req:login');
+  const d = doc('doc:a', 'Auth', { requirements: [req] });
+  const diagram = requirementHeatMap(d, [
+    stamp('req:login', 'understood'),
+    stamp('scn:happy', 'blocking'),
+    stamp('scn:sad', 'concern'),
+  ]);
+  assert.ok(diagram);
+  const lines = bodyLines(diagram);
+
+  assert.equal(lines[0], 'flowchart LR');
+  // The requirement rolls up to the worst of {understood, blocking, concern} = blocking.
+  assert.ok(lines.includes('R1["! Login"]:::blocking'), lines.join('\n'));
+  // Each scenario reflects only its own verdict.
+  assert.ok(lines.includes('S2("! happy"):::blocking'), lines.join('\n'));
+  assert.ok(lines.includes('S3("? sad"):::concern'), lines.join('\n'));
+  // blocking is styled red and dashed; concern is emitted; understood is not a node
+  // state anywhere (the requirement rolled past it) so its classDef is omitted.
+  assert.ok(
+    lines.some((l) => l.startsWith('classDef blocking ') && l.includes('stroke-dasharray')),
+    'blocking should be dashed'
+  );
+  assert.ok(lines.some((l) => l.startsWith('classDef concern ')));
+  assert.ok(!lines.some((l) => l.startsWith('classDef understood ')));
+});
+
+test('requirementHeatMap ranks approved above understood and marks understood with a middot', () => {
+  const calm = scenario('calm', [], 'scn:calm');
+  const risky = scenario('risky', [], 'scn:risky');
+  const req = requirement('R', [calm, risky], undefined, 'req:r');
+  const d = doc('doc:a', 'A', { requirements: [req] });
+  const diagram = requirementHeatMap(d, [
+    stamp('scn:calm', 'understood'),
+    stamp('scn:risky', 'approved'),
+  ]);
+  assert.ok(diagram);
+  const lines = bodyLines(diagram);
+
+  // approved (severity 2) outranks understood (1), so the requirement takes approved.
+  assert.ok(lines.includes('R1["✓ R"]:::approved'), lines.join('\n'));
+  assert.ok(lines.includes('S2("· calm"):::understood'), lines.join('\n'));
+  assert.ok(lines.includes('S3("✓ risky"):::approved'), lines.join('\n'));
+});
+
+test('requirementHeatMap leaves unstamped nodes grey with no marker', () => {
+  const req = requirement('Plain', [scenario('sc', [], 'scn:sc')], undefined, 'req:plain');
+  const d = doc('doc:a', 'A', { requirements: [req] });
+  const diagram = requirementHeatMap(d, []);
+  assert.ok(diagram);
+  const lines = bodyLines(diagram);
+
+  assert.ok(lines.includes('R1["Plain"]:::unreviewed'), lines.join('\n'));
+  assert.ok(lines.includes('S2("sc"):::unreviewed'), lines.join('\n'));
+  assert.ok(lines.some((l) => l.startsWith('classDef unreviewed ')));
+  // No marker glyph leaks into any label, and only the grey classDef is emitted.
+  assert.ok(!/[!?✓·]/.test(diagram.mermaid), diagram.mermaid);
+  assert.ok(!lines.some((l) => /classDef (blocking|concern|approved|understood) /.test(l)));
+});
+
+test('requirementHeatMap ignores stamps whose anchor matches nothing in the doc', () => {
+  const req = requirement('R', [], undefined, 'req:r');
+  const d = doc('doc:a', 'A', { requirements: [req] });
+  const diagram = requirementHeatMap(d, [stamp('req:elsewhere', 'blocking')]);
+  assert.ok(diagram);
+  const lines = bodyLines(diagram);
+
+  assert.ok(lines.includes('R1["R"]:::unreviewed'), lines.join('\n'));
+  assert.ok(!lines.some((l) => l.includes(':::blocking')));
+});
+
+// ---------------------------------------------------------------------------
+// blastDiagram
+// ---------------------------------------------------------------------------
+
+test('blastDiagram emphasises the root node with a thick-bordered class', () => {
+  const graph = bgraph(
+    'req:root',
+    [bnode('req:root', 'requirement', 'Root req'), bnode('scn:child', 'scenario', 'Child')],
+    [bedge('req:root', 'scn:child', 'structural')]
+  );
+  const diagram = blastDiagram(graph);
+  const lines = bodyLines(diagram);
+
+  assert.equal(lines[0], 'flowchart LR');
+  assert.ok(lines.includes('B0["Root req"]:::root'), lines.join('\n'));
+  assert.ok(!lines.some((l) => l.startsWith('B1') && l.includes(':::root')));
+  const rootDef = lines.find((l) => l.startsWith('classDef root '));
+  assert.ok(rootDef?.includes('stroke-width:3px'), String(rootDef));
+  assert.equal(diagram.kind, 'overview');
+});
+
+test('blastDiagram draws structural edges solid and inferred edges dashed', () => {
+  const graph = bgraph(
+    'req:a',
+    [
+      bnode('req:a', 'requirement', 'A'),
+      bnode('scn:b', 'scenario', 'B'),
+      bnode('req:c', 'requirement', 'C'),
+    ],
+    [bedge('req:a', 'scn:b', 'structural'), bedge('req:a', 'req:c', 'inferred')]
+  );
+  const lines = bodyLines(blastDiagram(graph));
+
+  assert.ok(lines.includes('B0 --> B1'), lines.join('\n'));
+  assert.ok(lines.includes('B0 -.-> B2'), lines.join('\n'));
+});
+
+test('blastDiagram shapes each node by its type', () => {
+  const graph = bgraph('req:r', [
+    bnode('req:r', 'requirement', 'Req'),
+    bnode('scn:s', 'scenario', 'Scn'),
+    bnode('task:t', 'task', 'Task'),
+    bnode('doc:d', 'doc', 'Doc'),
+    bnode('con:c', 'constitution', 'Clause'),
+  ]);
+  const lines = bodyLines(blastDiagram(graph));
+
+  assert.ok(lines.includes('B0["Req"]:::root'), lines.join('\n')); // requirement = rectangle
+  assert.ok(lines.includes('B1("Scn")'), 'scenario = rounded'); // scenario = rounded
+  assert.ok(lines.includes('B2(["Task"])'), 'task = stadium'); // task = stadium
+  assert.ok(lines.includes('B3[["Doc"]]'), 'doc = subroutine'); // doc = subroutine
+  assert.ok(lines.includes('B4{{"Clause"}}'), 'constitution = hexagon'); // constitution = hexagon
+});
+
+test('blastDiagram renders a valid single-node flowchart for a root-only graph', () => {
+  const diagram = blastDiagram(bgraph('req:solo', [bnode('req:solo', 'requirement', 'Solo')]));
+  const lines = bodyLines(diagram);
+
+  assert.equal(lines[0], 'flowchart LR');
+  assert.ok(lines.includes('B0["Solo"]:::root'));
+  assert.ok(lines.some((l) => l.startsWith('classDef root ')));
+  assert.ok(!lines.some((l) => l.includes('-->')));
+});
+
+test('blastDiagram renders a valid flowchart even for a node-less graph', () => {
+  const diagram = blastDiagram({ root: 'req:gone', nodes: [], edges: [] });
+  const lines = bodyLines(diagram);
+
+  assert.equal(lines[0], 'flowchart LR');
+  assert.ok(lines.includes('B0["(empty)"]'), lines.join('\n'));
+});
+
+test('blastDiagram drops an edge that names an undeclared node', () => {
+  const graph = bgraph(
+    'req:a',
+    [bnode('req:a', 'requirement', 'A')],
+    [bedge('req:a', 'ghost', 'structural')]
+  );
+  const lines = bodyLines(blastDiagram(graph));
+
+  assert.ok(!lines.some((l) => l.includes('-->')), lines.join('\n'));
+});
+
+test('blastDiagram escapes labels and never uses spec text as a node id', () => {
+  const nasty = 'He said "stop" [x] (y) {z} 50% `c`; end';
+  const graph = bgraph(
+    'req:n',
+    [bnode('req:n', 'requirement', nasty), bnode('scn:m', 'scenario', nasty)],
+    [bedge('req:n', 'scn:m', 'inferred')]
+  );
+  const raw = blastDiagram(graph).mermaid;
+
+  assert.ok(!raw.includes('"stop"'), raw);
+  assert.ok(!raw.includes('[x]'), raw);
+  assert.ok(!raw.includes('(y)'), raw);
+  assert.ok(!raw.includes('{z}'), raw);
+  assert.ok(!raw.includes('`c`'), raw);
+  // Node ids are generated ordinals, never the raw model ids.
+  assert.ok(!raw.includes('scn:m'), raw);
+  assert.ok(raw.includes('B0'), raw);
+  assert.ok(raw.includes('B1'), raw);
+  // Every emitted line keeps balanced quoting.
+  for (const line of raw.split('\n')) {
+    assert.equal((line.match(/"/g) ?? []).length % 2, 0, `unbalanced quotes: ${line}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// validateAuthoredMermaid
+// ---------------------------------------------------------------------------
+
+test('validateAuthoredMermaid accepts a well-formed state diagram with 3+ states', () => {
+  const src = [
+    'stateDiagram-v2',
+    '  [*] --> Draft',
+    '  Draft --> Review: submit',
+    '  Review --> Published: approve',
+    '  Review --> Draft: reject',
+    '  Published --> [*]',
+  ].join('\n');
+  assert.deepEqual(validateAuthoredMermaid(src, 'state'), { ok: true });
+});
+
+test('validateAuthoredMermaid accepts a well-formed er diagram with 3+ entities', () => {
+  const src = [
+    'erDiagram',
+    '  CUSTOMER ||--o{ ORDER : places',
+    '  ORDER ||--|{ LINE_ITEM : contains',
+    '  CUSTOMER {',
+    '    string name',
+    '  }',
+  ].join('\n');
+  assert.deepEqual(validateAuthoredMermaid(src, 'er'), { ok: true });
+});
+
+test('validateAuthoredMermaid accepts a well-formed sequence diagram (ignoring leading %% comments)', () => {
+  const src = [
+    '%% endpoint: POST /enrol',
+    'sequenceDiagram',
+    '  participant A as Storefront Web',
+    '  participant B as Auth Service',
+    '  participant C as Credential Store',
+    '  A->>B: request challenge',
+    '  B->>C: persist challenge',
+  ].join('\n');
+  assert.deepEqual(validateAuthoredMermaid(src, 'sequence'), { ok: true });
+});
+
+test('validateAuthoredMermaid rejects a body whose header is wrong for the type', () => {
+  const res = validateAuthoredMermaid('flowchart LR\n  A --> B --> C', 'sequence');
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /sequenceDiagram/);
+});
+
+test('validateAuthoredMermaid rejects a 2-node diagram as too trivial to draw', () => {
+  const src = [
+    'sequenceDiagram',
+    '  participant A as Alice',
+    '  participant B as Bob',
+    '  A->>B: hi',
+  ].join('\n');
+  const res = validateAuthoredMermaid(src, 'sequence');
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /2 distinct nodes|earns its place/);
+});
+
+test('validateAuthoredMermaid rejects empty or whitespace-only source', () => {
+  const res = validateAuthoredMermaid('   \n\n  ', 'state');
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /empty/i);
+});
+
+test('validateAuthoredMermaid rejects a hairball above the 24-node ceiling', () => {
+  const participants = Array.from({ length: 25 }, (_, i) => `  participant P${i} as Node ${i}`);
+  const src = ['sequenceDiagram', ...participants, '  P0->>P1: go'].join('\n');
+  const res = validateAuthoredMermaid(src, 'sequence');
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.match(res.error, /25 distinct nodes|Split it/);
 });

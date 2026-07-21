@@ -8,26 +8,21 @@
  *
  * State lives on disk, not in memory. Every read re-reads `notes.json`, which
  * keeps a second CLI invocation and the server honest about each other's writes
- * without a cache-invalidation story. The files are kilobytes.
+ * without a cache-invalidation story. The files are kilobytes. The durability
+ * primitives (atomic write, cross-process lock, corrupt-file quarantine,
+ * missing-dir-tolerant watch) live in `./jsonfile.js` and are shared with the
+ * review store.
  */
 
-import {
-  closeSync,
-  existsSync,
-  openSync,
-  statSync,
-  unlinkSync,
-  watch,
-  type FSWatcher,
-} from 'node:fs';
-import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { newId } from './ids.js';
+import { readJsonSafe, watchJsonDir, withFileLock, writeJsonAtomic } from './jsonfile.js';
 import type { Note, NoteKind, NoteStatus, NotesFile, Reply } from './types.js';
 
 const DIR_NAME = '.spec-scope';
 const FILE_NAME = 'notes.json';
+const LOCK_SUFFIX = '.lock';
 
 /** Limits exist because the browser posts straight into `add()`. */
 const MAX_BODY = 8000;
@@ -38,29 +33,9 @@ const DEFAULT_AUTHOR = 'human';
 /** One atomic write fires several fs events (tmp create, rename); collapse them. */
 const DEBOUNCE_MS = 50;
 
-/** Upper bound on quarantine attempts, so a pathological directory cannot spin. */
-const MAX_QUARANTINE = 1000;
-
-/** Cross-process write lock. Budget (tries * retry) is kept above the stale threshold
- *  so a lock abandoned by a crashed writer is always reclaimed within one acquire. */
-const LOCK_SUFFIX = '.lock';
-const LOCK_MAX_TRIES = 120;
-const LOCK_RETRY_MS = 50;
-const LOCK_STALE_MS = 5000;
-
 const NOTE_KINDS: readonly NoteKind[] = ['question', 'change', 'resolve'];
 
-/**
- * Per-process, monotonic counter. Combined with `process.pid` it makes every temp
- * filename unique, so two writers can never truncate a shared temp mid-flight.
- */
-let writeCounter = 0;
-
 type ChangeListener = (notes: Note[]) => void;
-
-function hasCode(err: unknown, code: string): boolean {
-  return typeof err === 'object' && err !== null && (err as NodeJS.ErrnoException).code === code;
-}
 
 /** Matches what `AbortSignal` consumers expect, without depending on DOMException. */
 function abortError(): Error {
@@ -101,10 +76,6 @@ function optionalAuthor(value: unknown): string {
   return requireText(value, 'author', MAX_AUTHOR);
 }
 
-function emptyFile(): NotesFile {
-  return { version: 1, notes: [] };
-}
-
 /** Reads and writes `<projectRoot>/.spec-scope/notes.json`. */
 export class NoteStore {
   /** Absolute path to the notes file. It may not exist yet. */
@@ -114,12 +85,13 @@ export class NoteStore {
   readonly warnings: string[] = [];
 
   private readonly dir: string;
+  private readonly lockPath: string;
   private readonly listeners = new Set<ChangeListener>();
 
   /** Serialises writes so two rapid POSTs cannot read-modify-write over each other. */
   private tail: Promise<unknown> = Promise.resolve();
 
-  private watcher: FSWatcher | null = null;
+  private watchHandle: { close(): void } | null = null;
   private watcherStarted = false;
   private debounce: NodeJS.Timeout | null = null;
   private closed = false;
@@ -127,41 +99,25 @@ export class NoteStore {
   constructor(projectRoot: string) {
     this.dir = path.join(path.resolve(projectRoot), DIR_NAME);
     this.file = path.join(this.dir, FILE_NAME);
+    this.lockPath = `${this.file}${LOCK_SUFFIX}`;
   }
 
   /**
    * Current on-disk state. A missing file is an empty store, not an error —
-   * every project starts without one.
+   * every project starts without one. A corrupt file is quarantined by
+   * `readJsonSafe`; a partial or hand-edited one is salvaged element by element
+   * so a consumer never sees a note that would throw in `formatNote`.
    */
   async load(): Promise<NotesFile> {
-    let raw: string;
-    try {
-      raw = await readFile(this.file, 'utf8');
-    } catch (err) {
-      if (hasCode(err, 'ENOENT')) return emptyFile();
-      throw err;
-    }
-
-    let rawNotes: unknown[];
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        !Array.isArray((parsed as { notes?: unknown }).notes)
-      ) {
-        throw new Error('expected an object with a "notes" array');
-      }
-      rawNotes = (parsed as { notes: unknown[] }).notes;
-    } catch (err) {
-      // Unreadable data is still the user's data: move it aside, never delete it.
-      await this.quarantine(err);
-      return emptyFile();
+    const { data, warnings } = await readJsonSafe<{ notes?: unknown }>(this.file, { notes: [] });
+    for (const warning of warnings) {
+      if (!this.warnings.includes(warning)) this.warnings.push(warning);
     }
 
     // A public repo can carry a hand-edited or partial notes.json. Normalise every
     // element so a missing/mistyped field can never crash export, `poll`/`notes`
     // or a reply — `load()` must never return a note that would throw in `formatNote`.
+    const rawNotes = Array.isArray(data.notes) ? data.notes : [];
     const notes: Note[] = [];
     let dropped = 0;
     for (const candidate of rawNotes) {
@@ -335,8 +291,8 @@ export class NoteStore {
       clearTimeout(this.debounce);
       this.debounce = null;
     }
-    this.watcher?.close();
-    this.watcher = null;
+    this.watchHandle?.close();
+    this.watchHandle = null;
     this.listeners.clear();
   }
 
@@ -365,102 +321,16 @@ export class NoteStore {
    * so their `load->modify->save` windows cannot interleave and drop a note.
    */
   private mutate<T>(apply: (file: NotesFile) => T): Promise<T> {
-    return this.run(async () => {
-      // This is the write path, and the only place that creates `.spec-scope`: a
-      // read-only `poll`/`notes` on a pristine repo must leave no directory behind.
-      await mkdir(this.dir, { recursive: true });
-      const release = await this.acquireLock();
-      try {
+    return this.run(() =>
+      // The lock file lives in `.spec-scope`; withFileLock creates it. A read-only
+      // `poll`/`notes` never reaches here, so a pristine repo keeps no directory.
+      withFileLock(this.lockPath, async () => {
         const file = await this.load();
         const result = apply(file);
-        await this.save(file);
+        await writeJsonAtomic(this.file, file);
         this.emit(file.notes);
         return result;
-      } finally {
-        release();
-      }
-    });
-  }
-
-  /**
-   * Serialises `load->mutate->save` across processes with an `O_EXCL` lock file,
-   * returning a release callback the caller must invoke in a finally.
-   *
-   * tradeoff: advisory, single-host, cooperative. It guards concurrent processes on
-   * one machine only — not writers on a shared network drive, and not a tool that
-   * ignores the lock. If a holder is SIGKILLed mid-write the lock file survives; the
-   * stale-lock takeover below reclaims it once its mtime is older than LOCK_STALE_MS.
-   * The residual risk is the mirror image: a *live* writer whose critical section
-   * genuinely outlives LOCK_STALE_MS (e.g. an AV scanner stalling the rename) could
-   * have its lock taken over — LOCK_STALE_MS is set well above a KB-file write to keep
-   * that vanishingly unlikely. Upgrade path: a real advisory byte-range lock
-   * (flock / LockFileEx) if cross-host or hard-kill windows ever need to be tight.
-   */
-  private async acquireLock(): Promise<() => void> {
-    const lockPath = `${this.file}${LOCK_SUFFIX}`;
-    for (let attempt = 0; attempt < LOCK_MAX_TRIES; attempt += 1) {
-      try {
-        closeSync(openSync(lockPath, 'wx'));
-        let released = false;
-        return () => {
-          if (released) return;
-          released = true;
-          try {
-            unlinkSync(lockPath);
-          } catch {
-            // Already gone (e.g. reclaimed as stale by another process): nothing to do.
-          }
-        };
-      } catch (err) {
-        if (!hasCode(err, 'EEXIST')) throw err;
-        breakStaleLock(lockPath);
-        await sleep(LOCK_RETRY_MS);
-      }
-    }
-    throw new Error(
-      `Could not acquire notes lock ${lockPath} after ${LOCK_MAX_TRIES} attempts; ` +
-        'another process may be stuck holding it.'
-    );
-  }
-
-  /** Write to a unique sibling temp file then rename, so readers never see a half-written file. */
-  private async save(next: NotesFile): Promise<void> {
-    writeCounter += 1;
-    // Unique per process (pid) and per write (counter): a concurrent writer can never
-    // truncate this temp file mid-flight the way a single fixed `.tmp` name allowed.
-    const tmp = `${this.file}.${process.pid}.${writeCounter}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
-    await rename(tmp, this.file);
-  }
-
-  /** Moves an unparseable notes file aside under the first unused index. */
-  private async quarantine(cause: unknown): Promise<void> {
-    const reason = cause instanceof Error ? cause.message : String(cause);
-
-    for (let n = 1; n <= MAX_QUARANTINE; n += 1) {
-      const name = `notes.corrupt-${n}.json`;
-      const target = path.join(this.dir, name);
-      // 'wx' claims the name atomically, so a concurrent quarantine takes the next.
-      let claimed;
-      try {
-        claimed = await open(target, 'wx');
-      } catch (err) {
-        if (hasCode(err, 'EEXIST')) continue;
-        this.warnings.push(
-          `${FILE_NAME} could not be parsed (${reason}) and could not be moved aside: ${String(err)}`
-        );
-        return;
-      }
-      await claimed.close();
-      await rename(this.file, target);
-      this.warnings.push(
-        `${FILE_NAME} could not be parsed (${reason}). It was moved to ${name} and an empty note store was started.`
-      );
-      return;
-    }
-
-    this.warnings.push(
-      `${FILE_NAME} could not be parsed (${reason}) and no free quarantine name was available.`
+      })
     );
   }
 
@@ -472,56 +342,9 @@ export class NoteStore {
   private ensureWatcher(): void {
     if (this.closed || this.watcherStarted) return;
     this.watcherStarted = true;
-    this.attachWatcher();
-  }
-
-  /**
-   * Attaches an fs watcher *without* creating `.spec-scope`. When the directory
-   * exists it watches the directory (so the first write is seen too); when it does
-   * not — a pristine repo running `poll`/`notes` — it watches the parent for the
-   * directory to appear, then re-targets onto the directory itself. A read-only
-   * command therefore never leaves an empty `.spec-scope` behind.
-   */
-  private attachWatcher(): void {
-    if (this.closed || this.watcher !== null) return;
-    const dirExists = existsSync(this.dir);
-    const target = dirExists ? this.dir : path.dirname(this.dir);
-    let swapped = false;
-    let watcher: FSWatcher;
-    try {
-      watcher = watch(target, (_event, filename) => {
-        const name = filename === null ? null : String(filename);
-        if (dirExists) {
-          if (name !== null && !name.startsWith(FILE_NAME)) return;
-          this.scheduleReload();
-          return;
-        }
-        // Still watching the parent: wait for `.spec-scope` itself to be created.
-        if (swapped || this.closed) return;
-        if (name !== null && name !== DIR_NAME) return;
-        if (!existsSync(this.dir)) return;
-        // The directory exists now: swap onto it and report the first write.
-        swapped = true;
-        this.watcher?.close();
-        this.watcher = null;
-        this.attachWatcher();
-        this.scheduleReload();
-      });
-    } catch (err) {
-      // `fs.watch` on the parent can still fail (it too may be missing): degrade to
-      // no live updates rather than crashing a review server.
-      this.warnings.push(`Could not watch ${DIR_NAME} for changes: ${String(err)}`);
-      return;
-    }
-    // Watch errors are not worth crashing a review server over.
-    watcher.on('error', () => {});
-    // Unref'd so a store the caller forgot to close() cannot wedge process exit.
-    watcher.unref();
-    if (this.closed) {
-      watcher.close();
-      return;
-    }
-    this.watcher = watcher;
+    // Only react to notes.json-family events, so a sibling review.json write in the
+    // same `.spec-scope` directory cannot spuriously wake a pending `poll`.
+    this.watchHandle = watchJsonDir(this.dir, () => this.scheduleReload(), FILE_NAME);
   }
 
   private scheduleReload(): void {
@@ -544,21 +367,6 @@ function findNote(file: NotesFile, noteId: string): Note {
   const note = file.notes.find((candidate) => candidate.id === noteId);
   if (note === undefined) throw new Error(`No note with id '${noteId}'`);
   return note;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/** Removes a lock left behind by a crashed writer, identified by an old mtime. */
-function breakStaleLock(lockPath: string): void {
-  try {
-    if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) unlinkSync(lockPath);
-  } catch {
-    // Vanished between the failed open and the stat: the next attempt retries cleanly.
-  }
 }
 
 /**

@@ -65,9 +65,9 @@ These guards protect the browser attack surface only. They do **not** authentica
 
 ### Spec Markdown is untrusted input
 
-spec-scope parses Markdown that may come from a pull request, a dependency, or an AI agent — none of which are trusted. Markdown is rendered as HTML in both the browser UI and the exported tech doc, so malicious spec content is a real XSS vector.
+spec-scope parses Markdown that may come from a pull request, a dependency, or an AI agent — none of which are trusted. Markdown is rendered as HTML in both the browser UI and the exported tech doc, so malicious spec content is a real XSS vector. The same applies to everything in `.spec-scope/` — a `notes.json` or `review.json` carried by a cloned public repo is attacker-controlled, so notes, decisions, explanations and glossary entries are treated as untrusted and rendered through the same escaping/sanitising path as spec content.
 
-Rendered Markdown is sanitised before it reaches the DOM, and text interpolated into generated Mermaid source is escaped. **A spec file that executes script in the UI or in an exported tech doc is a vulnerability — please report it.**
+Rendered Markdown is sanitised before it reaches the DOM, and text interpolated into generated Mermaid source is escaped. **A spec file — or a committed `.spec-scope/` file — that executes script in the UI or in an exported tech doc is a vulnerability — please report it.**
 
 Path handling is also a concern here: spec-scope resolves spec paths against the detected project root and does not follow references outside it. A crafted spec or request that reads a file outside the project root is a vulnerability.
 
@@ -81,15 +81,15 @@ Path handling is also a concern here: spec-scope resolves spec paths against the
 
 Notes are included in an export by default; pass `--no-notes` to omit them. Check what you're sending before you send it — discussion notes often contain franker language about a design than the spec does.
 
-### Notes are stored unencrypted
+### Review data is stored unencrypted
 
-`.spec-scope/notes.json` is plain JSON on disk with normal file permissions. It is not encrypted and not signed. Don't put credentials in review notes.
+`.spec-scope/notes.json` and `.spec-scope/review.json` are plain JSON on disk with normal file permissions. Neither is encrypted or signed. Don't put credentials in notes, decisions, or explanations.
 
 ### Out of scope
 
 The following are known properties of the design, not vulnerabilities:
 
-- Anyone with local filesystem access can read or modify `.spec-scope/notes.json`.
+- Anyone with local filesystem access can read or modify the files under `.spec-scope/`.
 - Anyone who can reach the bound port has full API access — that's why it binds loopback.
 - Author names on notes are self-reported and unverified. They are a convenience label, not an identity claim.
 - spec-scope makes no network calls and has no auto-update mechanism, so there is nothing to intercept.
@@ -100,5 +100,5 @@ These are properties we intend to keep. A change that breaks one is a bug:
 
 - **No network calls at runtime.** No telemetry, no CDN fetches, no update checks. Vendored assets are read from `node_modules` on disk.
 - **Loopback by default.** The default host is `127.0.0.1` and will stay that way.
-- **Read-only on your specs.** spec-scope never writes to your spec files. It writes to `.spec-scope/notes.json` and, on export, the output file — nothing else.
+- **Read-only on your specs.** spec-scope never writes to your spec files. It writes only inside `.spec-scope/` (notes and review data) and, on export, the output file — nothing else.
 - **No code execution from spec content.** Specs are parsed as text. Nothing in a spec file is ever evaluated.

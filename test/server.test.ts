@@ -19,6 +19,7 @@ import { promisify } from 'node:util';
 import { after, before, describe, it } from 'node:test';
 
 import { startServer, type ServerHandle } from '../src/server.js';
+import { ReviewStore } from '../src/review.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -180,6 +181,52 @@ function validNote(): string {
     kind: 'question',
     body: 'Which authenticators are in scope here?',
   });
+}
+
+/** Headers a first-party browser write carries, so the CSRF gate lets it through. */
+function sameOrigin(p: number): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    origin: `http://127.0.0.1:${p}`,
+    'sec-fetch-site': 'same-origin',
+  };
+}
+
+/** Holds an SSE connection open and counts frames of one named event. */
+function openSseCounting(
+  p: number,
+  eventName: string
+): { events: () => number; close: () => void } {
+  let count = 0;
+  let buf = '';
+  const re = new RegExp(`(^|\\n)event: ${eventName}(\\n|$)`);
+  const req = http.request({ host: '127.0.0.1', port: p, path: '/api/events' }, (res) => {
+    res.setEncoding('utf8');
+    res.on('data', (chunk: string) => {
+      buf += chunk;
+      const frames = buf.split('\n\n');
+      buf = frames.pop() ?? '';
+      for (const frame of frames) if (re.test(frame)) count += 1;
+    });
+  });
+  req.on('error', () => {
+    /* surfaced by close()/destroy(); nothing to do */
+  });
+  req.end();
+  return { events: () => count, close: () => req.destroy() };
+}
+
+/** First requirement id the parser assigned to the fixture, for anchored routes. */
+async function firstRequirementId(): Promise<string> {
+  const res = await request(port, { path: '/api/model' });
+  const payload = JSON.parse(res.body) as {
+    model: { docs: Array<{ requirements: Array<{ id: string }> }> };
+  };
+  for (const doc of payload.model.docs) {
+    const req = doc.requirements[0];
+    if (req) return req.id;
+  }
+  throw new Error('fixture has no requirement to anchor on');
 }
 
 let fixture: string;
@@ -380,6 +427,338 @@ describe('review server', () => {
         `leak child did not exit on its own (killed=${e.killed}, signal=${e.signal}, ` +
           `code=${e.code}): ${e.stderr ?? ''}`
       );
+    }
+  });
+});
+
+describe('review layer server', () => {
+  it('creates a decision (same-origin JSON) and surfaces it in GET /api/review', async () => {
+    const created = await request(port, {
+      path: '/api/decisions',
+      method: 'POST',
+      headers: sameOrigin(port),
+      body: JSON.stringify({
+        title: 'Adopt passkeys',
+        choice: 'Require a platform authenticator',
+        context: 'Passwords are phishable.',
+        provenance: 'inferred',
+      }),
+    });
+    assert.equal(created.status, 201, created.body);
+    const decision = (JSON.parse(created.body) as { decision: { id: string; status: string } })
+      .decision;
+    assert.ok(decision.id);
+    assert.equal(decision.status, 'open');
+
+    const review = await request(port, { path: '/api/review' });
+    assert.equal(review.status, 200);
+    const rf = (JSON.parse(review.body) as { review: { decisions: Array<{ id: string }> } }).review;
+    assert.ok(
+      rf.decisions.some((d) => d.id === decision.id),
+      review.body
+    );
+  });
+
+  it('blocks a cross-site POST to /api/decisions (CSRF gate covers the new routes)', async () => {
+    // The reproduced no-cors attack: a text/plain body a cross-site page can send.
+    const res = await request(port, {
+      path: '/api/decisions',
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: JSON.stringify({ title: 'x', choice: 'y' }),
+    });
+    assert.equal(res.status, 403, res.body);
+    assert.match(errorOf(res.body), /Content-Type/i);
+  });
+
+  it('blocks a cross-site POST to /api/stamps (Origin mismatch)', async () => {
+    const res = await request(port, {
+      path: '/api/stamps',
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://evil.example.com:1234' },
+      body: JSON.stringify({ anchor: 'a', anchorLabel: 'A', verdict: 'concern' }),
+    });
+    assert.equal(res.status, 403, res.body);
+    assert.match(errorOf(res.body), /Origin/i);
+  });
+
+  it('upserts a stamp: a repeat verdict updates the same record in place', async () => {
+    const post = (verdict: string): Promise<Res> =>
+      request(port, {
+        path: '/api/stamps',
+        method: 'POST',
+        headers: sameOrigin(port),
+        body: JSON.stringify({
+          anchor: 'req:upsert-target',
+          anchorLabel: 'Upsert target',
+          verdict,
+          author: 'reviewer',
+        }),
+      });
+
+    const first = await post('concern');
+    assert.equal(first.status, 200, first.body);
+    const stamp1 = (JSON.parse(first.body) as { stamp: { id: string; verdict: string } }).stamp;
+    assert.equal(stamp1.verdict, 'concern');
+
+    const second = await post('approved');
+    assert.equal(second.status, 200, second.body);
+    const stamp2 = (JSON.parse(second.body) as { stamp: { id: string; verdict: string } }).stamp;
+    assert.equal(stamp2.id, stamp1.id, 'upsert must reuse the stamp id, not create a new one');
+    assert.equal(stamp2.verdict, 'approved');
+
+    const review = await request(port, { path: '/api/review' });
+    const stamps = (
+      JSON.parse(review.body) as { review: { stamps: Array<{ anchor: string; author: string }> } }
+    ).review.stamps;
+    const forTarget = stamps.filter(
+      (s) => s.anchor === 'req:upsert-target' && s.author === 'reviewer'
+    );
+    assert.equal(forTarget.length, 1, 'exactly one stamp per (anchor, author)');
+  });
+
+  it('updates a decision, deletes it, and 404s an unknown id', async () => {
+    const created = await request(port, {
+      path: '/api/decisions',
+      method: 'POST',
+      headers: sameOrigin(port),
+      body: JSON.stringify({ title: 'Draft', choice: 'Option A' }),
+    });
+    assert.equal(created.status, 201, created.body);
+    const id = (JSON.parse(created.body) as { decision: { id: string } }).decision.id;
+
+    const updated = await request(port, {
+      path: `/api/decisions/${id}`,
+      method: 'POST',
+      headers: sameOrigin(port),
+      body: JSON.stringify({ status: 'recorded', choice: 'Option B' }),
+    });
+    assert.equal(updated.status, 200, updated.body);
+    const dec = (JSON.parse(updated.body) as { decision: { status: string; choice: string } })
+      .decision;
+    assert.equal(dec.status, 'recorded');
+    assert.equal(dec.choice, 'Option B');
+
+    const missingUpdate = await request(port, {
+      path: '/api/decisions/dec_nope',
+      method: 'POST',
+      headers: sameOrigin(port),
+      body: JSON.stringify({ title: 'x' }),
+    });
+    assert.equal(missingUpdate.status, 404, missingUpdate.body);
+
+    // A bodyless same-origin DELETE (no Content-Type) must pass the CSRF gate.
+    const del = await request(port, { path: `/api/decisions/${id}`, method: 'DELETE' });
+    assert.equal(del.status, 204, del.body);
+
+    const missingDelete = await request(port, {
+      path: '/api/decisions/dec_nope',
+      method: 'DELETE',
+    });
+    assert.equal(missingDelete.status, 404, missingDelete.body);
+  });
+
+  it('deletes a stamp and 404s an unknown id', async () => {
+    const created = await request(port, {
+      path: '/api/stamps',
+      method: 'POST',
+      headers: sameOrigin(port),
+      body: JSON.stringify({
+        anchor: 'req:delete-me',
+        anchorLabel: 'Delete me',
+        verdict: 'blocking',
+      }),
+    });
+    assert.equal(created.status, 200, created.body);
+    const id = (JSON.parse(created.body) as { stamp: { id: string } }).stamp.id;
+
+    const del = await request(port, { path: `/api/stamps/${id}`, method: 'DELETE' });
+    assert.equal(del.status, 204, del.body);
+
+    const missing = await request(port, { path: '/api/stamps/stamp_nope', method: 'DELETE' });
+    assert.equal(missing.status, 404, missing.body);
+  });
+
+  it('applies a ReviewBatch and the explanation appears in GET /api/review', async () => {
+    const batch = {
+      explanations: [
+        {
+          anchor: 'doc:auth/req:sign-in',
+          anchorLabel: 'Authentication / Sign in with a passkey',
+          kind: 'summary',
+          body: 'Users prove identity with a platform passkey.',
+          provenance: 'inferred',
+          sources: [],
+          specHash: 'deadbeef',
+        },
+      ],
+    };
+    const res = await request(port, {
+      path: '/api/apply',
+      method: 'POST',
+      headers: sameOrigin(port),
+      body: JSON.stringify(batch),
+    });
+    assert.equal(res.status, 200, res.body);
+    const result = JSON.parse(res.body) as { added: number; updated: number };
+    assert.equal(result.added, 1, res.body);
+    assert.equal(result.updated, 0);
+
+    const review = await request(port, { path: '/api/review' });
+    const explanations = (
+      JSON.parse(review.body) as { review: { explanations: Array<{ anchor: string }> } }
+    ).review.explanations;
+    assert.ok(
+      explanations.some((e) => e.anchor === 'doc:auth/req:sign-in'),
+      review.body
+    );
+  });
+
+  it('returns a blast graph for a known anchor and 400s a missing one', async () => {
+    const anchor = await firstRequirementId();
+    const res = await request(port, {
+      path: `/api/blast?anchor=${encodeURIComponent(anchor)}`,
+    });
+    assert.equal(res.status, 200, res.body);
+    const body = JSON.parse(res.body) as {
+      graph: { root: string; nodes: unknown[]; edges: unknown[] };
+      mermaid: string;
+    };
+    assert.equal(body.graph.root, anchor);
+    assert.ok(Array.isArray(body.graph.nodes) && Array.isArray(body.graph.edges));
+    // The browser renders the subgraph from this ready-made Mermaid source.
+    assert.match(body.mermaid, /flowchart/);
+
+    const missing = await request(port, { path: '/api/blast' });
+    assert.equal(missing.status, 400, missing.body);
+  });
+
+  it('returns change entries and explain tasks as arrays', async () => {
+    const changes = await request(port, { path: '/api/changes' });
+    assert.equal(changes.status, 200);
+    assert.ok(Array.isArray((JSON.parse(changes.body) as { changes: unknown[] }).changes));
+
+    const explain = await request(port, { path: '/api/explain' });
+    assert.equal(explain.status, 200);
+    const tasks = (JSON.parse(explain.body) as { tasks: Array<{ kind: string; specHash: string }> })
+      .tasks;
+    assert.ok(Array.isArray(tasks));
+    // The fixture requirement is unexplained, so a summary task is always emitted.
+    const summary = tasks.find((t) => t.kind === 'summary');
+    assert.ok(summary, explain.body);
+    // The task carries the hash the agent copies to close the staleness loop.
+    assert.ok(summary.specHash.length > 0, 'summary task must carry a specHash');
+  });
+
+  it('serves a review heat-map keyed by anchor id, and 400s/404s bad input', async () => {
+    const anchor = await firstRequirementId();
+    const docIdOf = anchor.slice(0, anchor.indexOf('/req:'));
+    // Stamp a verdict, then the heat map must render (tint is anchor-keyed server-side,
+    // never re-derived from node text in the browser).
+    const stamped = await request(port, {
+      path: '/api/stamps',
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ anchor, anchorLabel: 'x', verdict: 'blocking' }),
+    });
+    assert.equal(stamped.status, 200, stamped.body);
+
+    const heat = await request(port, { path: `/api/heatmap?doc=${encodeURIComponent(docIdOf)}` });
+    assert.equal(heat.status, 200, heat.body);
+    assert.match((JSON.parse(heat.body) as { mermaid: string }).mermaid, /flowchart/);
+
+    assert.equal((await request(port, { path: '/api/heatmap' })).status, 400);
+    assert.equal((await request(port, { path: '/api/heatmap?doc=doc:nope' })).status, 404);
+  });
+
+  it('rejects an invalid /api/apply element with 400, not 500', async () => {
+    const bad = await request(port, {
+      path: '/api/apply',
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({
+        explanations: [
+          {
+            anchor: 'a'.repeat(600), // over the 512 cap -> validation error
+            anchorLabel: 'x',
+            kind: 'summary',
+            body: 'y',
+            provenance: 'grounded',
+            sources: [],
+            specHash: 'h',
+            author: 'a',
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      }),
+    });
+    assert.equal(bad.status, 400, bad.body);
+  });
+
+  it('emits an SSE review event when review.json changes on disk', async () => {
+    // Drives the cross-process watcher path (a hand edit / a second CLI), exactly
+    // as the notes feed reacts to notes.json.
+    const reviewFile = path.join(fixture, '.spec-scope', 'review.json');
+    await mkdir(path.dirname(reviewFile), { recursive: true });
+    const empty = {
+      version: 1,
+      decisions: [],
+      stamps: [],
+      explanations: [],
+      glossary: [],
+      diagrams: [],
+      diagramSkips: [],
+    };
+    await writeFile(reviewFile, JSON.stringify(empty), 'utf8');
+
+    const sse = openSseCounting(port, 'review');
+    try {
+      await delay(300); // connect + let the watcher target .spec-scope
+      const before = sse.events();
+      await writeFile(reviewFile, JSON.stringify({ ...empty, touched: Date.now() }), 'utf8');
+      const delivered = await waitFor(() => sse.events() > before, 3000);
+      assert.ok(delivered, 'expected a review SSE event from the watcher');
+    } finally {
+      sse.close();
+    }
+  });
+
+  it('close() and a failed start each tear down the ReviewStore', async () => {
+    // The review watcher is unref'd, so its leak is invisible to any handle count
+    // (getActiveResourcesInfo and _getActiveHandles both omit unref'd handles) —
+    // a count test stays green with the teardown deleted, so it proves nothing.
+    // Spy on the collaborator instead: ESM modules are singletons, so this
+    // ReviewStore class object is the exact one the server imports. Patch the
+    // prototype (call through, restore in finally) and assert the server actually
+    // invoked close() on both the success and the failed-start paths.
+    // Deliberate spy: stash the real method and restore it in finally. The
+    // unbound-method rule is a false positive here — we call it back with an
+    // explicit `this`, which is the whole point.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const realClose = ReviewStore.prototype.close;
+    let closeCalls = 0;
+    ReviewStore.prototype.close = function (this: ReviewStore): void {
+      closeCalls += 1;
+      realClose.call(this); // release the watcher for real, so the process still exits
+    };
+    try {
+      const h1 = await startServer({ root: fixture, port: 0 });
+      closeCalls = 0;
+      await h1.close();
+      assert.equal(closeCalls, 1, 'close() must tear down the ReviewStore');
+
+      const h2 = await startServer({ root: fixture, port: 0 });
+      try {
+        closeCalls = 0;
+        // A second start on the taken port rejects; its catch-block teardown must
+        // close the ReviewStore it already opened.
+        await assert.rejects(startServer({ root: fixture, port: h2.port }));
+        assert.equal(closeCalls, 1, 'a failed start must tear down the ReviewStore it opened');
+      } finally {
+        await h2.close();
+      }
+    } finally {
+      ReviewStore.prototype.close = realClose;
     }
   });
 });

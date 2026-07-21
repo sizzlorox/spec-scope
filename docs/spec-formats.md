@@ -234,8 +234,9 @@ Requirements are recognised as **headings**, in two ways:
 
 2. Any level-3 heading **directly under** a level-2 requirements section. The section heading must be
    `Requirements`, `Functional Requirements`, `Non-functional Requirements` or `Technical Requirements`
-   (the trailing `Requirements` is required; the leading word is optional). Under such a section the
-   whole heading text becomes the requirement name, so a Spec Kit `FR-NNN` heading works:
+   (the trailing `Requirements` is required; the leading word is optional). A trailing template
+   annotation is tolerated, so `## Requirements *(mandatory)*` counts. Under such a section the whole
+   heading text becomes the requirement name, so a Spec Kit `FR-NNN` heading works:
 
    ```markdown
    ## Functional Requirements
@@ -247,13 +248,26 @@ Requirements are recognised as **headings**, in two ways:
    front of the name — it's how people refer to these in conversation, and dropping it would make
    anchors unreadable.
 
-The section gate matters: a `### FR-001: …` heading that is **not** under one of those level-2
-sections is treated as an ordinary sub-heading and does not become a requirement. Section names
-outside that set — `## Success Criteria`, for example — do not enable the rule.
+3. A **`- **FR-NNN**:` list item** under the same level-2 requirements section — the canonical Spec
+   Kit template form. The bolded identifier becomes the requirement name and the statement after the
+   colon becomes its text:
+
+   ```markdown
+   ## Functional Requirements
+
+   - **FR-001**: System MUST capture incoming notifications.
+   ```
+
+   → `Requirement { name: 'FR-001', text: 'System MUST capture incoming notifications.' }`. Keeping the
+   id as the name keeps the requirement map and note anchors short; the full statement is the text.
+
+The section gate matters for both forms: an `### FR-001: …` heading or a `- **FR-001**:` bullet that
+is **not** under one of those level-2 sections is not a requirement. Section names outside that set —
+`## Success Criteria`, for example — do not enable the rule.
 
 ### User stories
 
-A heading beginning with `User Story` becomes a `Requirement`:
+A heading beginning with `User Story` **or** a `US-N` identifier becomes a `Requirement`:
 
 ```markdown
 ## User Scenarios & Testing
@@ -264,8 +278,10 @@ An agent that has just written a spec waits for a human to review it before impl
 ```
 
 → `Requirement { name: 'User Story 1 - Agent polls for review notes' }`. The `User Story N -` prefix
-is **kept**; only a trailing `(Priority: PN)` suffix is **stripped**. (The heading level is not
-constrained to 3 — the rule fires on any heading whose text starts with `User Story`.)
+is **kept**; only a trailing `(Priority: PN)` / `(P1)` suffix is **stripped**. The canonical Spec Kit
+template's short form is also recognised — `### US-1 — Quick Code Access (P1)` yields
+`Requirement { name: 'US-1 — Quick Code Access' }`. (`US` must be followed by a digit, so an ordinary
+word like `Usage` is never mistaken for a story. The heading level is not constrained to 3.)
 
 Spec Kit's "as a … I want …" bullet is also recognised as a requirement: a list item matching
 `As a <role>, I want <goal>[, so that …]` yields `Requirement { name: '<Goal>' }` — the `I want`
@@ -433,10 +449,6 @@ promise.
   into three steps. The step grammar matches on the leading keyword only, so the line becomes a single
   `GIVEN` step whose text is the rest of the sentence. Write one keyword per line to get distinct
   steps.
-- **The `- **FR-001**:` requirement bullet.** A bolded `FR-NNN` identifier in a _list item_ is not
-  modelled as a requirement — it renders from the verbatim Markdown like any other prose. Spec Kit
-  `FR-NNN` requirements are recognised only as headings under a requirements section (see
-  [Functional requirements](#functional-requirements)).
 - **Setext (underline) headings.** Only ATX headings (`#`, `##`, …) are recognised. A title underlined
   with `===` or `---` is not seen as a heading, so a `Requirement: X` written that way is prose.
 - **Raw HTML blocks.** The scanner does not track HTML blocks, so it neither renders them specially

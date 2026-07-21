@@ -21,8 +21,28 @@
         <span class="brand-name">spec-scope</span>
         <span id="flavor-badge" class="badge badge-quiet">loading…</span>
       </div>
+      <nav class="viewtabs" aria-label="Views">
+        <button id="tab-doc" class="viewtab" type="button" aria-current="page">Doc</button>
+        <button id="tab-decisions" class="viewtab" type="button" aria-current="false">
+          Decisions
+        </button>
+        <button id="tab-changes" class="viewtab" type="button" aria-current="false">Changes</button>
+        <button id="tab-glossary" class="viewtab" type="button" aria-current="false">
+          Glossary
+        </button>
+      </nav>
       <div class="topbar-actions">
+        <button id="agent-waiting" type="button" aria-haspopup="dialog" data-empty="true">
+          <span class="agent-glyph" aria-hidden="true">⏳</span>
+          <span id="agent-count" class="badge badge-agent">0</span>
+          <span class="agent-label">for the agent</span>
+        </button>
+        <button id="openq-toggle" type="button" aria-haspopup="dialog">
+          Open questions <span id="openq-count" class="badge badge-openq">0</span>
+        </button>
+        <button id="density-toggle" type="button" aria-pressed="false">Density: Digest</button>
         <button id="theme-toggle" type="button" aria-live="off">Theme: auto</button>
+        <button id="howto-toggle" type="button" aria-haspopup="dialog">How to review</button>
         <button id="help-toggle" type="button" aria-expanded="false" aria-controls="help-popover">
           Shortcuts <kbd>?</kbd>
         </button>
@@ -95,6 +115,23 @@
         <dd>Submit the note or reply you are typing</dd>
       </dl>
       <button id="help-close" type="button">Close</button>
+    </div>
+
+    <div
+      id="modal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-title"
+      hidden
+    >
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2 id="modal-title">Details</h2>
+          <button id="modal-close" type="button">Close</button>
+        </div>
+        <div id="modal-body" class="modal-body"></div>
+      </div>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

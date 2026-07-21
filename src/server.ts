@@ -15,10 +15,21 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { detectProject } from './detect.js';
 import { parseProject } from './parse.js';
-import { generateDiagrams } from './diagram.js';
+import { blastDiagram, generateDiagrams, requirementHeatMap } from './diagram.js';
 import { NoteStore } from './notes.js';
+import { ReviewStore } from './review.js';
+import { blastRadius } from './blast.js';
+import { changeEntries } from './changes.js';
+import { explainWork } from './explainwork.js';
 import { readVendor, type VendorAsset } from './vendor.js';
-import type { Diagram, NoteKind, SpecModel } from './types.js';
+import type {
+  DecisionStatus,
+  Diagram,
+  NoteKind,
+  Provenance,
+  ReviewVerdict,
+  SpecModel,
+} from './types.js';
 
 export interface ServerHandle {
   url: string;
@@ -70,6 +81,42 @@ const CSP = [
 ].join('; ');
 
 const NOTE_KINDS: readonly NoteKind[] = ['question', 'change', 'resolve'];
+const PROVENANCES: readonly Provenance[] = ['grounded', 'inferred', 'unstated'];
+const REVIEW_VERDICTS: readonly ReviewVerdict[] = ['understood', 'concern', 'blocking', 'approved'];
+const DECISION_STATUSES: readonly DecisionStatus[] = ['open', 'recorded', 'superseded'];
+
+/**
+ * Whitelists of the keys each review write route forwards from an untrusted body.
+ * The ReviewStore re-validates every value, so these decide only *which* keys may
+ * cross the boundary — never their shape. Create omits `status` (a new decision is
+ * always `open`); update accepts it.
+ */
+const DECISION_CREATE_FIELDS = [
+  'title',
+  'context',
+  'options',
+  'choice',
+  'tradeoffs',
+  'consequence',
+  'provenance',
+  'sources',
+  'threadNoteId',
+  'author',
+] as const;
+const DECISION_UPDATE_FIELDS = [
+  'title',
+  'context',
+  'options',
+  'choice',
+  'tradeoffs',
+  'consequence',
+  'provenance',
+  'sources',
+  'threadNoteId',
+  'author',
+  'status',
+] as const;
+const STAMP_FIELDS = ['anchor', 'anchorLabel', 'verdict', 'note', 'author'] as const;
 
 interface ModelPayload {
   model: SpecModel;
@@ -148,6 +195,23 @@ function parseJsonObject(raw: string): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Copies just the whitelisted keys that are actually present from an untrusted
+ * body into a fresh object, so an unexpected key (`id`, `createdAt`, a
+ * prototype-pollution attempt) never reaches the store. Values pass through
+ * unexamined; the ReviewStore validates their shape.
+ */
+function pickPresent(
+  body: Record<string, unknown>,
+  fields: readonly string[]
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (body[field] !== undefined) out[field] = body[field];
+  }
+  return out;
 }
 
 /** Binds one port, distinguishing "taken" from every other failure. */
@@ -273,6 +337,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
 
   const detected = await detectProject(opts.root);
   const store = new NoteStore(detected.root);
+  const reviewStore = new ReviewStore(detected.root);
 
   const publicBind = isPublicHost(host);
   const streams = new Set<ServerResponse>();
@@ -314,6 +379,9 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
 
   const unsubscribe = store.onChange(() => {
     broadcast('notes', { ok: true });
+  });
+  const unsubscribeReview = reviewStore.onChange(() => {
+    broadcast('review', { ok: true });
   });
 
   let debounce: NodeJS.Timeout | null = null;
@@ -550,6 +618,133 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     sendError(res, 404, `unknown note action ${action}`);
   }
 
+  /**
+   * `/api/decisions` (create), `/api/decisions/:id` (update / delete). The
+   * cross-site write guard already ran in the main handler, so this only routes
+   * and validates. Store validation errors on optional fields surface as 500 (see
+   * the tradeoff on the create branch); a missing id is a 404, not a 500.
+   */
+  async function handleDecisions(
+    req: IncomingMessage,
+    res: ServerResponse,
+    segments: string[]
+  ): Promise<void> {
+    const method = req.method ?? 'GET';
+    const id = segments[2]; // ['api', 'decisions', id?]
+
+    if (id === undefined) {
+      if (method !== 'POST') {
+        return sendError(res, 405, `method ${method} not allowed on /api/decisions`);
+      }
+      const body = await takeJsonBody(req, res);
+      if (!body) return;
+      const title = asString(body['title']);
+      const choice = asString(body['choice']);
+      if (!title || !choice) {
+        return sendError(res, 400, 'title and choice are required strings');
+      }
+      const provenance = body['provenance'];
+      if (provenance !== undefined && !PROVENANCES.includes(provenance as Provenance)) {
+        return sendError(res, 400, `provenance must be one of ${PROVENANCES.join(', ')}`);
+      }
+      // tradeoff: length/shape violations on optional fields (over-long context,
+      // a non-string option) surface from the store as a 500, matching the notes
+      // POST path which likewise lets store validation throw. Upgrade path: a
+      // typed ValidationError on ReviewStore that this handler maps to 400.
+      const input = pickPresent(body, DECISION_CREATE_FIELDS) as Parameters<
+        ReviewStore['addDecision']
+      >[0];
+      const decision = await reviewStore.addDecision(input);
+      return sendJson(res, 201, { decision });
+    }
+
+    if (method === 'POST') {
+      const body = await takeJsonBody(req, res);
+      if (!body) return;
+      const provenance = body['provenance'];
+      if (provenance !== undefined && !PROVENANCES.includes(provenance as Provenance)) {
+        return sendError(res, 400, `provenance must be one of ${PROVENANCES.join(', ')}`);
+      }
+      const status = body['status'];
+      if (status !== undefined && !DECISION_STATUSES.includes(status as DecisionStatus)) {
+        return sendError(res, 400, `status must be one of ${DECISION_STATUSES.join(', ')}`);
+      }
+      const patch = pickPresent(body, DECISION_UPDATE_FIELDS) as Parameters<
+        ReviewStore['updateDecision']
+      >[1];
+      try {
+        const decision = await reviewStore.updateDecision(id, patch);
+        return sendJson(res, 200, { decision });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/^No decision with id/.test(message)) return sendError(res, 404, message);
+        throw err;
+      }
+    }
+
+    if (method === 'DELETE') {
+      try {
+        await reviewStore.removeDecision(id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/^No decision with id/.test(message)) return sendError(res, 404, message);
+        throw err;
+      }
+      res.writeHead(204, baseHeaders());
+      res.end();
+      return;
+    }
+
+    return sendError(res, 405, `method ${method} not allowed on /api/decisions/:id`);
+  }
+
+  /** `/api/stamps` (upsert), `/api/stamps/:id` (delete). */
+  async function handleStamps(
+    req: IncomingMessage,
+    res: ServerResponse,
+    segments: string[]
+  ): Promise<void> {
+    const method = req.method ?? 'GET';
+    const id = segments[2]; // ['api', 'stamps', id?]
+
+    if (id === undefined) {
+      if (method !== 'POST') {
+        return sendError(res, 405, `method ${method} not allowed on /api/stamps`);
+      }
+      const body = await takeJsonBody(req, res);
+      if (!body) return;
+      const anchor = asString(body['anchor']);
+      const anchorLabel = asString(body['anchorLabel']);
+      const verdict = asString(body['verdict']);
+      if (!anchor || !anchorLabel) {
+        return sendError(res, 400, 'anchor and anchorLabel are required strings');
+      }
+      if (!verdict || !REVIEW_VERDICTS.includes(verdict as ReviewVerdict)) {
+        return sendError(res, 400, `verdict must be one of ${REVIEW_VERDICTS.join(', ')}`);
+      }
+      const input = pickPresent(body, STAMP_FIELDS) as Parameters<ReviewStore['setStamp']>[0];
+      // setStamp is an idempotent upsert (one stamp per anchor+author); a repeat
+      // updates in place, so 200 — not 201 — is the honest status.
+      const stamp = await reviewStore.setStamp(input);
+      return sendJson(res, 200, { stamp });
+    }
+
+    if (method === 'DELETE') {
+      try {
+        await reviewStore.removeStamp(id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/^No stamp with id/.test(message)) return sendError(res, 404, message);
+        throw err;
+      }
+      res.writeHead(204, baseHeaders());
+      res.end();
+      return;
+    }
+
+    return sendError(res, 405, `method ${method} not allowed on /api/stamps/:id`);
+  }
+
   const server = createServer((req, res) => {
     void (async () => {
       try {
@@ -585,9 +780,79 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
           return sendJson(res, 200, await getModel());
         }
 
+        if (pathname === '/api/review') {
+          if (method !== 'GET') return sendError(res, 405, 'review is GET only');
+          return sendJson(res, 200, { review: await reviewStore.load() });
+        }
+
+        if (pathname === '/api/apply') {
+          if (method !== 'POST') return sendError(res, 405, 'apply is POST only');
+          const body = await takeJsonBody(req, res);
+          if (!body) return;
+          for (const field of ['explanations', 'decisions', 'glossary'] as const) {
+            const value = body[field];
+            if (value !== undefined && !Array.isArray(value)) {
+              return sendError(res, 400, `${field} must be an array`);
+            }
+          }
+          try {
+            // applyBatch validates every element up front and throws before it
+            // writes anything, so a throw here is bad client input -> 400.
+            // tradeoff: a rare write-time I/O failure would also surface as 400.
+            const result = await reviewStore.applyBatch(body);
+            return sendJson(res, 200, result);
+          } catch (err) {
+            return sendError(res, 400, err instanceof Error ? err.message : String(err));
+          }
+        }
+
+        if (pathname === '/api/blast') {
+          if (method !== 'GET') return sendError(res, 405, 'blast is GET only');
+          const anchor = new URL(req.url ?? '/', 'http://localhost').searchParams.get('anchor');
+          if (!anchor) return sendError(res, 400, 'anchor query parameter is required');
+          const { model } = await getModel();
+          const graph = blastRadius(model, anchor);
+          // Ship the rendered Mermaid too, so the browser can draw the subgraph
+          // without re-implementing blastDiagram client-side.
+          return sendJson(res, 200, { graph, mermaid: blastDiagram(graph).mermaid });
+        }
+
+        if (pathname === '/api/changes') {
+          if (method !== 'GET') return sendError(res, 405, 'changes is GET only');
+          const { model } = await getModel();
+          return sendJson(res, 200, { changes: changeEntries(model) });
+        }
+
+        if (pathname === '/api/heatmap') {
+          if (method !== 'GET') return sendError(res, 405, 'heatmap is GET only');
+          const docId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('doc');
+          if (!docId) return sendError(res, 400, 'doc query parameter is required');
+          const { model } = await getModel();
+          const doc = model.docs.find((d) => d.id === docId);
+          if (!doc) return sendError(res, 404, `unknown doc ${docId}`);
+          // Tint by anchor id server-side, where the ids are unambiguous — the
+          // browser must never re-derive verdicts from node label text.
+          const stamps = (await reviewStore.load()).stamps;
+          const heat = requirementHeatMap(doc, stamps);
+          return sendJson(res, 200, { mermaid: heat ? heat.mermaid : null });
+        }
+
+        if (pathname === '/api/explain') {
+          if (method !== 'GET') return sendError(res, 405, 'explain is GET only');
+          const { model } = await getModel();
+          const [review, notes] = await Promise.all([reviewStore.load(), store.list()]);
+          return sendJson(res, 200, { tasks: explainWork(model, review, notes) });
+        }
+
         const segments = pathname.split('/').filter(Boolean);
         if (segments[0] === 'api' && segments[1] === 'notes') {
           return await handleNotes(req, res, segments);
+        }
+        if (segments[0] === 'api' && segments[1] === 'decisions') {
+          return await handleDecisions(req, res, segments);
+        }
+        if (segments[0] === 'api' && segments[1] === 'stamps') {
+          return await handleStamps(req, res, segments);
         }
         if (segments[0] === 'api') {
           return sendError(res, 404, `unknown endpoint ${pathname}`);
@@ -621,10 +886,12 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     for (const timer of rearmTimers) clearTimeout(timer);
     rearmTimers.clear();
     unsubscribe();
+    unsubscribeReview();
     for (const watcher of watchers) watcher.close();
     for (const stream of streams) stream.end();
     streams.clear();
     store.close();
+    reviewStore.close();
     throw err;
   }
   allowedAuthorities = buildAuthorities(host, port);
@@ -642,10 +909,12 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
       for (const timer of rearmTimers) clearTimeout(timer);
       rearmTimers.clear();
       unsubscribe();
+      unsubscribeReview();
       for (const watcher of watchers) watcher.close();
       for (const stream of streams) stream.end();
       streams.clear();
       store.close();
+      reviewStore.close();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
         // Keep-alive sockets would otherwise hold `close` open for seconds.

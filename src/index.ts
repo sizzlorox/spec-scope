@@ -9,10 +9,21 @@
 
 export type * from './types.js';
 
-export { generateDiagrams } from './diagram.js';
+export {
+  blastDiagram,
+  generateDiagrams,
+  requirementHeatMap,
+  validateAuthoredMermaid,
+} from './diagram.js';
+export type { DiagramValidation } from './diagram.js';
 export { exportTechDoc, renderTechDoc } from './export.js';
 export type { ExportOptions } from './export.js';
+export { docStructureSource, requirementSource, scenarioSource, specHash } from './hash.js';
 export { NoteStore } from './notes.js';
 export { parseProject } from './parse.js';
+export { blastRadius } from './blast.js';
+export { changeEntries } from './changes.js';
+export { explainWork } from './explainwork.js';
+export { ReviewStore } from './review.js';
 export { startServer } from './server.js';
 export type { ServerHandle } from './server.js';

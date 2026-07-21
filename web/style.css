@@ -37,6 +37,38 @@
   --focus: #2f5fd0;
   --shadow: 0 1px 2px rgb(16 20 28 / 8%), 0 6px 18px rgb(16 20 28 / 6%);
 
+  /* Provenance — the honesty signal. Colour is never the only cue (each chip
+     also carries a glyph + label), but it must read distinctly in both themes. */
+  --prov-grounded: #1d7a4c;
+  --prov-grounded-soft: #dcf1e6;
+  --prov-inferred: #9a6212;
+  --prov-inferred-soft: #fbeed6;
+  --prov-unstated: #5a6373;
+  --prov-unstated-soft: #eceef2;
+
+  /* Review verdicts. blocking is the loud one. */
+  --verdict-understood: #2f5fd0;
+  --verdict-understood-soft: #e4ebfb;
+  --verdict-approved: #1d7a4c;
+  --verdict-approved-soft: #dcf1e6;
+  --verdict-concern: #9a6212;
+  --verdict-concern-soft: #fbeed6;
+  --verdict-blocking: #b3261e;
+  --verdict-blocking-soft: #fbe1df;
+
+  /* Authored-diagram types. One hue per type so the five read apart at a glance;
+     colour is always redundant to the badge's glyph + word, never the only signal. */
+  --dtype-state: #6d3bd1;
+  --dtype-state-soft: #ece3fb;
+  --dtype-er: #0f7d82;
+  --dtype-er-soft: #d6eff0;
+  --dtype-sequence: #2f5fd0;
+  --dtype-sequence-soft: #e4ebfb;
+  --dtype-flowchart: #9a6212;
+  --dtype-flowchart-soft: #fbeed6;
+  --dtype-class: #b5259e;
+  --dtype-class-soft: #f9e0f4;
+
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 
@@ -72,6 +104,33 @@
 
   --focus: #6f9bff;
   --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 18px rgb(0 0 0 / 30%);
+
+  --prov-grounded: #58cc95;
+  --prov-grounded-soft: #16301f;
+  --prov-inferred: #e0b060;
+  --prov-inferred-soft: #322715;
+  --prov-unstated: #a3adbd;
+  --prov-unstated-soft: #0d1015;
+
+  --verdict-understood: #6f9bff;
+  --verdict-understood-soft: #1d2942;
+  --verdict-approved: #58cc95;
+  --verdict-approved-soft: #16301f;
+  --verdict-concern: #e0b060;
+  --verdict-concern-soft: #322715;
+  --verdict-blocking: #ff8a80;
+  --verdict-blocking-soft: #3a1c1c;
+
+  --dtype-state: #b79bff;
+  --dtype-state-soft: #241a3d;
+  --dtype-er: #58c7cc;
+  --dtype-er-soft: #123030;
+  --dtype-sequence: #6f9bff;
+  --dtype-sequence-soft: #1d2942;
+  --dtype-flowchart: #e0b060;
+  --dtype-flowchart-soft: #322715;
+  --dtype-class: #f08bd8;
+  --dtype-class-soft: #3a1c33;
 }
 
 * {
@@ -204,6 +263,8 @@ kbd {
 .topbar-actions {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .layout {
@@ -715,6 +776,586 @@ kbd {
   display: none;
 }
 
+/* ---------- view tabs ---------- */
+
+.viewtabs {
+  display: flex;
+  gap: 0.2rem;
+}
+
+.viewtab {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.viewtab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.viewtab[aria-current='page'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.badge-openq {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.badge-openq[data-empty='true'] {
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
+/* ---------- provenance chip ---------- */
+
+.prov {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.6;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.prov-glyph {
+  font-weight: 800;
+}
+
+.prov-grounded {
+  color: var(--prov-grounded);
+  background: var(--prov-grounded-soft);
+}
+
+.prov-inferred {
+  color: var(--prov-inferred);
+  background: var(--prov-inferred-soft);
+}
+
+/* unstated: muted outline — the honest gap should look quiet, not alarming. */
+.prov-unstated {
+  color: var(--prov-unstated);
+  background: transparent;
+  border-style: dashed;
+}
+
+/* ---------- plain layer ---------- */
+
+.anchor-extra {
+  margin: 0.1rem 0 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.anchor-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+/* AI-authored companions carry a persistent left rule + tint + an "AI" mark, so the
+   Diátaxis line between explanation (agent) and reference (spec text) is unmissable. */
+.plain-layer {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 0.5rem 0.7rem;
+  color: var(--text);
+  font-size: 0.92em;
+}
+
+/* The "AI" affordance: small, quiet, always beside agent prose. */
+.ai-mark {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  padding: 0 0.32rem;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.plain-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+
+.plain-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.plain-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+/* An unstated companion is an open question, not a summary: a muted outline that
+   echoes the unstated-provenance treatment, so the gap reads quietly on sight — the
+   reframed label and body carry the meaning, this is a redundant, calm visual cue. */
+.plain-unstated {
+  border-left-color: var(--prov-unstated);
+  background: var(--prov-unstated-soft);
+  color: var(--text-muted);
+}
+
+.plain-hint {
+  border-left: 3px dashed var(--border-strong);
+  background: none;
+  color: var(--text-faint);
+  font-size: 0.85em;
+  padding: 0.3rem 0.7rem;
+  font-style: italic;
+}
+
+.plain-hint code {
+  font-family: var(--mono);
+  font-style: normal;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+
+.badge-stale {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.plain-sources {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+}
+
+.source-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  font-size: inherit;
+}
+
+.source-quote {
+  display: block;
+  border-left: 2px solid var(--border);
+  padding-left: 0.5rem;
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ---------- stamp control ---------- */
+
+.stamp-control {
+  display: inline-block;
+  position: relative;
+}
+
+.stamp-control > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+}
+
+.stamp-control > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verdict-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.6;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.verdict-glyph {
+  font-weight: 800;
+}
+
+.verdict-understood {
+  color: var(--verdict-understood);
+  background: var(--verdict-understood-soft);
+  border-color: var(--verdict-understood);
+}
+
+.verdict-approved {
+  color: var(--verdict-approved);
+  background: var(--verdict-approved-soft);
+  border-color: var(--verdict-approved);
+}
+
+.verdict-concern {
+  color: var(--verdict-concern);
+  background: var(--verdict-concern-soft);
+  border-color: var(--verdict-concern);
+}
+
+.verdict-blocking {
+  color: var(--verdict-blocking);
+  background: var(--verdict-blocking-soft);
+  border-color: var(--verdict-blocking);
+  font-weight: 800;
+  box-shadow: 0 0 0 2px var(--verdict-blocking-soft);
+}
+
+.stamp-menu {
+  position: absolute;
+  z-index: 15;
+  margin-top: 0.3rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 11rem;
+}
+
+.stamp-menu button {
+  text-align: left;
+  font-size: 0.8rem;
+  border: none;
+  background: none;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+}
+
+.stamp-menu button:hover {
+  background: var(--bg-hover);
+}
+
+/* blocking requirements should be loud on the heading itself. */
+.anchor-head[data-verdict='blocking'] .anchor-select {
+  border-color: var(--verdict-blocking);
+  border-style: solid;
+  box-shadow: inset 3px 0 0 var(--verdict-blocking);
+}
+
+/* ---------- review summary ---------- */
+
+.review-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.review-summary .verdict-chip {
+  font-size: 0.68rem;
+}
+
+/* ---------- decision / change / glossary views ---------- */
+
+.review-view {
+  max-width: 62rem;
+}
+
+.review-view > h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1.5rem;
+}
+
+.review-view > .view-intro {
+  color: var(--text-muted);
+  margin: 0 0 1.2rem;
+}
+
+.decision-card,
+.change-entry,
+.glossary-term {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 0.8rem 0.95rem;
+  margin-bottom: 0.9rem;
+}
+
+.decision-head,
+.change-head,
+.glossary-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.decision-title {
+  font-size: 1.05rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.decision-field {
+  margin: 0.4rem 0;
+}
+
+.decision-field > .field-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-right: 0.4rem;
+}
+
+.decision-field .field-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.decision-field ul {
+  margin: 0.2rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.decision-tradeoffs {
+  border-left: 3px solid var(--warn);
+  padding-left: 0.6rem;
+  color: var(--text-muted);
+}
+
+.change-summary {
+  overflow-wrap: anywhere;
+}
+
+.change-prose {
+  margin: 0.3rem 0;
+}
+
+.change-ba {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.change-ba .ba-slot {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-sunken);
+}
+
+.change-ba .ba-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.change-ba .ba-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.9em;
+}
+
+.badge-delta[data-delta='ADDED'] {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.badge-delta[data-delta='REMOVED'] {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.badge-delta[data-delta='RENAMED'] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.glossary-term-name {
+  font-size: 1.05rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.glossary-def {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.glossary-open {
+  color: var(--prov-unstated);
+  font-style: italic;
+}
+
+/* ---------- blast + open-questions modal ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 45%);
+  padding: 1rem;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  max-width: min(52rem, 94vw);
+  max-height: 88vh;
+  overflow: auto;
+  width: 100%;
+}
+
+.modal-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.modal-body {
+  padding: 1rem;
+}
+
+.modal-body svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.legend {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.7rem;
+}
+
+.legend-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.legend-swatch {
+  width: 1.6rem;
+  border-top: 2px solid var(--text-muted);
+}
+
+.legend-swatch.dashed {
+  border-top-style: dashed;
+}
+
+.oq-group {
+  margin-bottom: 1rem;
+}
+
+.oq-group h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+}
+
+.oq-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.4rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.oq-item .oq-anchor {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+/* ---------- hover-sync ---------- */
+
+.step-li.step-active {
+  background: var(--accent-soft);
+  border-radius: 4px;
+  outline: 1px solid var(--accent);
+}
+
+.msg-active {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+.diagram-body .messageText.msg-active {
+  fill: var(--accent);
+  font-weight: 700;
+}
+
 /* ---------- narrow screens ---------- */
 
 @media (max-width: 1100px) {
@@ -747,4 +1388,847 @@ kbd {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---------- per-anchor action bar ---------- */
+
+.anchor-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-height: 1.6rem;
+}
+
+.anchor-bar-verdict {
+  display: inline-flex;
+  align-items: center;
+}
+
+.anchor-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+/*
+ * Reveal on hover or keyboard focus of the heading or the bar. The buttons stay
+ * in the DOM and the tab order at all times, so the bar is keyboard-operable even
+ * while it reads as quiet; focus-within brings it fully visible before it is
+ * reached. `.anchor-extra` is always the heading's immediate next sibling, so the
+ * adjacent-sibling selector picks it up on heading hover/focus.
+ */
+.anchor-head:hover + .anchor-extra .anchor-bar-actions,
+.anchor-head:focus-within + .anchor-extra .anchor-bar-actions,
+.anchor-extra:hover .anchor-bar-actions,
+.anchor-extra:focus-within .anchor-bar-actions {
+  opacity: 1;
+}
+
+/* Coarse pointers have no hover, so keep the bar visible there. */
+@media (hover: none) {
+  .anchor-bar-actions {
+    opacity: 1;
+  }
+}
+
+.abtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.45rem;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid transparent;
+}
+
+.abtn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.abtn-glyph {
+  font-weight: 700;
+  color: var(--text-faint);
+}
+
+.verdict-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.verdict-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.05rem 0.15rem;
+  opacity: 0.7;
+}
+
+.verdict-btn:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}
+
+.verdict-btn.is-active {
+  opacity: 1;
+  border-color: currentColor;
+}
+
+/* ---------- plain layer actions ---------- */
+
+.plain-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+}
+
+.plain-action {
+  font-size: 0.76rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text);
+}
+
+.plain-action:hover {
+  background: var(--bg-hover);
+}
+
+.plain-hint-line {
+  margin-bottom: 0.1rem;
+}
+
+.plain-requested {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ---------- waiting-for-agent indicator ---------- */
+
+#agent-waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.badge-agent {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+#agent-waiting[data-empty='true'] .badge-agent {
+  background: var(--bg-sunken);
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
+.agent-label {
+  color: var(--text-muted);
+}
+
+/* ---------- how-to-review modal ---------- */
+
+.howto h3 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.howto h3:first-child {
+  margin-top: 0;
+}
+
+.howto-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 0.9rem;
+  margin: 0;
+}
+
+.howto-list dt {
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.howto-list dd {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.howto-prov {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.howto-prov-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.howto-note,
+.modal-intro {
+  color: var(--text-muted);
+}
+
+.howto-note code,
+.modal-intro code {
+  font-family: var(--mono);
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+
+.oq-item-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ---------- review-empty call to action ---------- */
+
+.review-cta {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem;
+  margin-bottom: 1.4rem;
+  max-width: 62rem;
+}
+
+.review-cta-title {
+  font-weight: 650;
+  font-size: 1.05rem;
+  margin-bottom: 0.3rem;
+}
+
+.review-cta-body {
+  margin: 0 0 0.6rem;
+  color: var(--text);
+}
+
+.review-cta-cmd {
+  margin: 0 0 0.6rem;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.8rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  white-space: pre;
+}
+
+.review-cta-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.83rem;
+  color: var(--text-muted);
+}
+
+/* ---------- liveness flash ---------- */
+
+@keyframes just-updated {
+  0% {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+.just-updated {
+  animation: just-updated 1.5s ease-out;
+  border-radius: var(--radius);
+}
+
+/* ---------- summary-first digest layout ---------- */
+
+.doc-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+/* The at-a-glance card: the conclusion a scanner reads before any formal text. */
+.digest-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+  padding: 0.9rem 1.05rem;
+  margin-bottom: 1.4rem;
+  max-width: 62rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.digest-eyebrow {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.digest-overview {
+  margin: 0;
+}
+
+.digest-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.4rem;
+}
+
+.digest-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.digest-stat-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+
+.digest-stat-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.digest-card .review-summary {
+  margin-top: 0;
+}
+
+.digest-openq {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.digest-openq-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.digest-openq-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+/* ---------- normative intro prose ---------- */
+
+.doc-intro {
+  border-left: 3px solid var(--border-strong);
+  padding-left: 0.9rem;
+  margin-bottom: 1.4rem;
+  color: var(--text);
+}
+
+/* ---------- delta group label ---------- */
+
+.delta-group-label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 1.1rem 0 0.5rem;
+}
+
+.delta-group-word {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ---------- requirement cards ---------- */
+
+.req-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  max-width: 62rem;
+}
+
+.req-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.req-card[data-expanded='true'] {
+  box-shadow: var(--shadow);
+}
+
+/* The heading is the descriptive requirement name — the scent, not "Requirement 4". */
+.req-card > .anchor-head {
+  margin: 0;
+}
+
+.req-card > .anchor-head .anchor-select {
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+
+/* The one-click disclosure that reveals formal text + scenarios (capped at one level). */
+.req-disclosure {
+  align-self: flex-start;
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.req-disclosure:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.req-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-top: 0.2rem;
+}
+
+.req-detail[hidden] {
+  display: none;
+}
+
+/* Normative spec text: a source-of-truth block, visually distinct from AI prose —
+   no accent tint, a strong neutral rule, and a "Spec text" tag. */
+.req-formal {
+  border-left: 3px solid var(--border-strong);
+  background: var(--bg-sunken);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 0.5rem 0.8rem;
+}
+
+.req-formal-tag {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 0.3rem;
+}
+
+.req-formal-body {
+  max-width: none;
+}
+
+.req-formal-body > :first-child {
+  margin-top: 0;
+}
+
+.req-formal-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- scenario blocks + GWT lanes ---------- */
+
+.scenario {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.scenario > .anchor-head {
+  margin: 0;
+}
+
+.scenario > .anchor-head .anchor-select {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.gwt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.gwt-lane {
+  display: grid;
+  grid-template-columns: 4.2rem minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: start;
+  border-left: 3px solid var(--border-strong);
+  padding: 0.25rem 0.5rem;
+  border-radius: 0 6px 6px 0;
+  background: var(--bg-sunken);
+}
+
+.gwt-given {
+  border-left-color: var(--prov-unstated);
+}
+
+.gwt-when {
+  border-left-color: var(--accent);
+}
+
+.gwt-then {
+  border-left-color: var(--ok);
+}
+
+.gwt-lane-label {
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding-top: 0.15rem;
+}
+
+.gwt-lane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.gwt-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.1rem 0.25rem;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+.gwt-kw {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.gwt-actor {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.gwt-text {
+  color: var(--text);
+}
+
+/* Hover-sync highlight on a GWT message row (reuses .step-active semantics). */
+.gwt-step.step-li {
+  cursor: default;
+}
+
+.gwt-step.step-active {
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+}
+
+/* ---------- on-demand scenario diagram ---------- */
+
+.scenario-diagram {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.scenario-diagram-toggle,
+.diagrams-toggle {
+  align-self: flex-start;
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.scenario-diagram-toggle:hover,
+.diagrams-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.scenario-diagram-holder[hidden] {
+  display: none;
+}
+
+/* ---------- doc-level diagrams (lazy disclosure) ---------- */
+
+.diagrams-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin: 2rem 0 0.8rem;
+}
+
+.diagrams-head h3 {
+  margin: 0;
+}
+
+.diagrams-holder[hidden] {
+  display: none;
+}
+
+/* ---------- requirement outline (tree sub-nodes) ---------- */
+
+.tree-reqs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin: 0.1rem 0 0.4rem 0.5rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--border);
+}
+
+.tree-req {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 0.22rem 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.tree-req:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.tree-req[aria-current='true'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tree-req-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A blocking verdict on an outline node reads at a glance without relying on colour. */
+.tree-req[data-verdict='blocking'] {
+  box-shadow: inset 2px 0 0 var(--verdict-blocking);
+}
+
+.tree-req[data-verdict='concern'] {
+  box-shadow: inset 2px 0 0 var(--verdict-concern);
+}
+
+/* ---------- authored diagrams (agent judgement, shown by default) ---------- */
+
+.authored-diagrams {
+  margin: 0 0 1.4rem;
+  max-width: 62rem;
+}
+
+.authored-diagrams-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.7rem;
+}
+
+.authored-diagrams-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.authored-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
+
+.authored-diagrams-holder {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* The AI treatment: a left rule that marks the diagram as the agent's judgement,
+   matching the accent rule the plain companions carry. Stale turns it amber. */
+.diagram-authored {
+  border-left: 3px solid var(--accent);
+}
+
+.diagram-authored[data-stale='true'] {
+  border-left-color: var(--warn);
+}
+
+.diagram-authored-head {
+  /* The caption (badges + title) wraps and pushes the actions to the right. */
+  align-items: flex-start;
+}
+
+.diagram-caption {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.diagram-caption .diagram-title {
+  overflow-wrap: anywhere;
+}
+
+.diagram-authored .diagram-actions {
+  flex: none;
+}
+
+.diagram-trigger {
+  margin: 0;
+  padding: 0.5rem 0.7rem 0.7rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.diagram-trigger-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  flex: none;
+}
+
+/* ---------- authored-diagram type badge ---------- */
+
+.diagram-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.6;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  letter-spacing: 0.03em;
+}
+
+.diagram-type-glyph {
+  font-weight: 800;
+}
+
+.diagram-type-state {
+  color: var(--dtype-state);
+  background: var(--dtype-state-soft);
+}
+
+.diagram-type-er {
+  color: var(--dtype-er);
+  background: var(--dtype-er-soft);
+}
+
+.diagram-type-sequence {
+  color: var(--dtype-sequence);
+  background: var(--dtype-sequence-soft);
+}
+
+.diagram-type-flowchart {
+  color: var(--dtype-flowchart);
+  background: var(--dtype-flowchart-soft);
+}
+
+.diagram-type-class {
+  color: var(--dtype-class);
+  background: var(--dtype-class-soft);
+}
+
+.diagram-type-other {
+  color: var(--text-muted);
+  background: var(--bg-sunken);
+}
+
+/* ---------- "needs a diagram" affordance + skip note ---------- */
+
+.diagram-needed {
+  border-left: 3px dashed var(--border-strong);
+  background: var(--bg-sunken);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 0.6rem 0.8rem;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.diagram-skip-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.diagram-skip-glyph {
+  font-style: normal;
+  font-weight: 700;
+}
+
+/* Set the derived (mechanical) diagrams apart from the authored ones above. */
+.diagrams-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.diagrams-derived-note {
+  font-size: 0.72rem;
+  color: var(--text-faint);
 }

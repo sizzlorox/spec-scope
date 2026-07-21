@@ -42,9 +42,20 @@ const CHECKBOX_RE = /^\[([^\]])\]\s*(.*)$/;
 const DELTA_HEADING_RE = /^(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements?$/i;
 const REQUIREMENT_HEADING_RE = /^Requirements?\s*:\s*(.+)$/i;
 const SCENARIO_HEADING_RE = /^Scenarios?\s*:\s*(.+)$/i;
-const STORY_HEADING_RE = /^user story\b/i;
-const SPECKIT_REQ_SECTION_RE = /^(functional|non-functional|technical)?\s*requirements$/i;
+// A user-story heading in either dialect: `User Story 1 - …` or the canonical
+// Spec Kit template's `US-1 — …` / `US1 …`. `us` must be followed by a digit (with
+// an optional dash/space) so an ordinary word like "usage" never matches.
+const STORY_HEADING_RE = /^(?:user story\b|us[-\s]?\d)/i;
+// A Spec Kit requirements section heading. Tolerates the template's trailing
+// annotation, e.g. `## Requirements *(mandatory)*`, which is otherwise identical.
+const SPECKIT_REQ_SECTION_RE =
+  /^(functional|non-functional|technical)?\s*requirements(?:\s*\*{0,2}\s*\([^)]*\)\s*\*{0,2})?$/i;
 const PRIORITY_SUFFIX_RE = /\s*\(\s*(?:priority|p)\s*[:=]?\s*[^)]*\)\s*$/i;
+// A Spec Kit functional requirement written as a list item: `- **FR-001**: text`.
+// Recognised only inside a requirements section, so a stray `**AB-12**:` bullet
+// elsewhere is not promoted. The id becomes the requirement name; the statement
+// after the colon becomes its text.
+const FR_BULLET_RE = /^(?:\*\*|__)([A-Za-z]{1,6}-\d+)(?:\*\*|__)\s*:\s*(.+)$/;
 const AS_A_RE = /^as an?\s+[^,]+,\s*i\s+want\s+(?:to\s+)?(.+?)\s*(?:,\s*so that\b.*)?\.?$/i;
 const TASK_ID_PREFIX_RE = /^(?:T|TASK[- ]?)\d{1,4}[.:)\]]?\s+/i;
 /**
@@ -396,6 +407,21 @@ export function parseMarkdown(markdown: string, relPath: string): SpecDoc {
         taskIndex += 1;
         if (collectingText) textLines.push(raw);
         continue;
+      }
+
+      // A `- **FR-001**: …` requirement bullet, but only inside a Spec Kit
+      // requirements section. The id is the requirement name (keeps the map and
+      // the note anchors short) and the statement is its text.
+      if (inSpeckitReqSection) {
+        const fr = FR_BULLET_RE.exec(content);
+        if (fr) {
+          openRequirement((fr[1] ?? '').trim(), lineNo, 3);
+          if (currentReq) currentReq.text = (fr[2] ?? '').trim();
+          // The statement lives on the bullet itself; don't absorb the next
+          // bullet's line into this requirement's text.
+          collectingText = false;
+          continue;
+        }
       }
 
       const step = STEP_RE.exec(content);

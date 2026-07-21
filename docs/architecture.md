@@ -29,19 +29,25 @@ writing one more consumer, not touching the pipeline.
 
 ## Modules
 
-| Module           | Responsibility                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------ |
-| `src/types.ts`   | The entire data model. No logic. Everything downstream reads this and nothing else.  |
-| `src/ids.ts`     | Stable, name-derived identifiers. Pure.                                              |
-| `src/detect.ts`  | Locate the project root, identify the flavor, return the directories worth scanning. |
-| `src/parse.ts`   | Walk the spec dirs, parse Markdown into `SpecModel`. The only Markdown-aware module. |
-| `src/diagram.ts` | `SpecModel` → `Diagram[]`. Pure, synchronous, no I/O.                                |
-| `src/notes.ts`   | `NoteStore`: persistence, long-poll, and change notification for discussion notes.   |
-| `src/vendor.ts`  | Resolve and read the vendored Mermaid/Marked bundles out of `node_modules`.          |
-| `src/server.ts`  | Local HTTP server: static assets, JSON API, SSE change stream.                       |
-| `src/export.ts`  | Render the model, diagrams and notes into one self-contained HTML file.              |
-| `src/cli.ts`     | Argument parsing and dispatch. Holds no business logic.                              |
-| `web/`           | The browser UI. Plain HTML, CSS and ES modules — no framework, no build step.        |
+| Module               | Responsibility                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| `src/types.ts`       | The entire data model. No logic. Everything downstream reads this and nothing else.   |
+| `src/ids.ts`         | Stable, name-derived identifiers. Pure.                                               |
+| `src/detect.ts`      | Locate the project root, identify the flavor, return the directories worth scanning.  |
+| `src/parse.ts`       | Walk the spec dirs, parse Markdown into `SpecModel`. The only Markdown-aware module.  |
+| `src/diagram.ts`     | `SpecModel` → `Diagram[]`. Pure, synchronous, no I/O.                                 |
+| `src/notes.ts`       | `NoteStore`: persistence, long-poll, and change notification for discussion notes.    |
+| `src/jsonfile.ts`    | Shared durability helpers: atomic write, an `O_EXCL` lock, corrupt-file quarantine.   |
+| `src/review.ts`      | `ReviewStore`: the review sidecar (decisions, stamps, explanations, glossary).        |
+| `src/hash.ts`        | Content hashes that pin an explanation to the spec text it explains. Pure.            |
+| `src/blast.ts`       | `SpecModel` + anchor → downstream subgraph (structural + lexical-inferred). Pure.     |
+| `src/changes.ts`     | Delta markers → prose change entries with quoted before/after. Pure.                  |
+| `src/explainwork.ts` | Diff the spec against the review file → the agent's to-do list. Pure.                 |
+| `src/vendor.ts`      | Resolve and read the vendored Mermaid/Marked bundles out of `node_modules`.           |
+| `src/server.ts`      | Local HTTP server: static assets, JSON API, SSE change stream.                        |
+| `src/export.ts`      | Render the model, diagrams, notes and review layer into one self-contained HTML file. |
+| `src/cli.ts`         | Argument parsing and dispatch. Holds no business logic.                               |
+| `web/`               | The browser UI. Plain HTML, CSS and ES modules — no framework, no build step.         |
 
 ### detect
 
@@ -94,8 +100,10 @@ anchor is a real bug and not a cosmetic one.
 All interpolated text goes through `escapeMermaid()`. It rewrites the characters that would
 otherwise break Mermaid's parser: a literal `;` (Mermaid's statement separator, which cannot be
 entity-escaped) becomes a full-width look-alike `；`, and `#`, `%`, `` ` ``, `"`, `(`, `)`, `[`, `]`,
-`{` and `}` are replaced with numeric-entity escapes. Colons and angle brackets are not on that
-list. Skipping the escape is the most common cause of a blank diagram.
+`{`, `}`, `<`, `>` and `&` are replaced with numeric-entity escapes. `<`/`>`/`&` are on the list so a
+requirement named `<img …>` cannot become a live element in a Mermaid `htmlLabels` foreignObject;
+colons are not (they are harmless in a label). Skipping the escape is the most common cause of a blank
+diagram.
 
 ### notes
 
@@ -231,14 +239,27 @@ All responses are JSON unless noted. Errors are `{ "error": string }` with an ap
 | `POST`   | `/api/notes/:id/resolve` | `{ note: Note }`                                                       |
 | `POST`   | `/api/notes/:id/reopen`  | `{ note: Note }`                                                       |
 | `DELETE` | `/api/notes/:id`         | `204 No Content`; `404` when no note has that id                       |
+| `GET`    | `/api/review`            | `{ review: ReviewFile }`                                               |
+| `GET`    | `/api/explain`           | `{ tasks: ExplainTask[] }`                                             |
+| `GET`    | `/api/changes`           | `{ changes: ChangeEntry[] }`                                           |
+| `GET`    | `/api/blast?anchor=<id>` | `{ graph: BlastGraph, mermaid: string }`                               |
+| `GET`    | `/api/heatmap?doc=<id>`  | `{ mermaid: string \| null }` — requirement map tinted by verdict      |
+| `POST`   | `/api/decisions`         | `{ decision }`; `POST /api/decisions/:id` updates; `DELETE` removes    |
+| `POST`   | `/api/stamps`            | `{ stamp }` — upsert per anchor; `DELETE /api/stamps/:id` removes      |
+| `POST`   | `/api/apply`             | `{ added, updated }` — body a `ReviewBatch`; invalid input is `400`    |
 | `GET`    | `/api/events`            | SSE stream                                                             |
+
+Every mutating route (`POST`/`DELETE` under `/api`) is gated by the CSRF and `Host`-header checks
+described in [SECURITY.md](../SECURITY.md). See [docs/review-layer.md](./review-layer.md) for the
+review endpoints in depth.
 
 ### SSE events
 
-| Event   | Fires when                                                    | Client does                      |
-| ------- | ------------------------------------------------------------- | -------------------------------- |
-| `model` | A spec file changed on disk                                   | Re-fetch `/api/model`, re-render |
-| `notes` | A note was created, replied to, resolved, reopened or deleted | Re-fetch `/api/notes`            |
+| Event    | Fires when                                                            | Client does                      |
+| -------- | --------------------------------------------------------------------- | -------------------------------- |
+| `model`  | A spec file changed on disk                                           | Re-fetch `/api/model`, re-render |
+| `notes`  | A note was created, replied to, resolved, reopened or deleted         | Re-fetch `/api/notes`            |
+| `review` | `review.json` changed (a decision, stamp, explanation, glossary edit) | Re-fetch `/api/review`           |
 
 Events carry no payload worth trusting — they're change signals, and the client re-fetches. That
 keeps the client from having to merge partial state and makes a missed event self-healing.
