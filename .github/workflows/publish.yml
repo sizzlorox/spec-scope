@@ -38,9 +38,8 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Build
-        run: npm run build
-
+      # No explicit build step: `npm publish` runs the package's `prepublishOnly`
+      # (clean + build), so the dist is produced from a clean tree as part of publish.
       - name: Publish
         run: npm publish --provenance --access public
         env:
