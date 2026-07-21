@@ -9,10 +9,10 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { watch, existsSync, type FSWatcher } from 'node:fs';
+import { watch, existsSync, readdirSync, type FSWatcher } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, isAbsolute } from 'node:path';
 import { detectProject } from './detect.js';
 import { parseProject } from './parse.js';
 import { blastDiagram, generateDiagrams, requirementHeatMap } from './diagram.js';
@@ -55,16 +55,16 @@ const PORT_ATTEMPTS = 20;
 const MAX_BODY_BYTES = 64 * 1024;
 const HEARTBEAT_MS = 25_000;
 const WATCH_DEBOUNCE_MS = 150;
-/** How often to retry a spec watcher whose directory vanished (git checkout). */
-const SPEC_REARM_MS = 500;
 /**
- * How often to check that each watched spec dir still exists. Node 24's recursive
- * `fs.watch` on Linux can go silent when the watched root is deleted — no `error`,
- * no event — so the event-driven re-arm never fires. This poll notices the vanish
- * and re-arms regardless. Kept shorter than a typical delete→recreate gap so a
- * fast `git checkout` is not missed between ticks.
+ * How often to re-sync the per-directory spec watchers with the tree on disk. It
+ * recovers a delete→recreate that fs.watch did not report (Node 24's recursive
+ * watch on Linux went silent; a flat watcher can miss its own root's removal) and
+ * picks up subtree changes between events. Kept shorter than a typical
+ * delete→recreate gap so a fast `git checkout` is not missed between ticks.
  */
 const SPEC_SWEEP_MS = 250;
+/** Ceiling on directories watched per server, so a pathological tree cannot spin. */
+const MAX_WATCHED_DIRS = 4096;
 
 /**
  * Static routes are an explicit map rather than a path join so a crafted URL
@@ -350,14 +350,12 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
 
   const publicBind = isPublicHost(host);
   const streams = new Set<ServerResponse>();
-  const watchers: FSWatcher[] = [];
-  /** dir -> its live watcher, so the existence sweep can find and re-arm a vanished one. */
-  const armedDirs = new Map<string, FSWatcher>();
+  /** Absolute dir path -> its non-recursive watcher (one per directory in each spec tree). */
+  const dirWatchers = new Map<string, FSWatcher>();
   /** Set once bind succeeds; requests only arrive after that, so never empty then. */
   let allowedAuthorities: ReadonlySet<string> = new Set();
-  /** Flipped on teardown so a re-arming spec watcher cannot resurrect itself. */
+  /** Flipped on teardown so a re-syncing spec watcher cannot resurrect itself. */
   let stopped = false;
-  const rearmTimers = new Set<NodeJS.Timeout>();
   let cached: ModelPayload | null = null;
   let inFlight: Promise<ModelPayload> | null = null;
   /** Bumped on every spec change so a parse that raced an edit is not cached. */
@@ -406,87 +404,105 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     }, WATCH_DEBOUNCE_MS);
   }
 
-  /** Retry a vanished spec dir until it is watchable again, without wedging exit. */
-  function scheduleRearm(dir: string): void {
-    if (stopped) return;
-    const timer = setTimeout(() => {
-      rearmTimers.delete(timer);
-      armSpecWatcher(dir);
-    }, SPEC_REARM_MS);
-    // Never keep the process alive just to poll for a directory that may not return.
-    timer.unref();
-    rearmTimers.add(timer);
-  }
-
-  /** Drops a dead spec watcher and schedules its re-establishment. */
-  function dropAndRearm(watcher: FSWatcher, dir: string): void {
-    const index = watchers.indexOf(watcher);
-    if (index < 0) return; // a racing event already handled this watcher
-    watchers.splice(index, 1);
-    armedDirs.delete(dir);
-    try {
-      watcher.close();
-    } catch {
-      // already gone
-    }
-    // The disruption is itself a spec change worth telling clients about, and
-    // we re-establish once the directory is back.
-    onSpecChange();
-    scheduleRearm(dir);
-  }
-
   /**
-   * Watches one spec dir and, crucially, survives it being deleted+recreated
-   * (git checkout, spec regen). A recursive watch on a deleted root never
-   * recovers on its own: Linux raises a fatal `error` (unhandled, it crashes
-   * the process) while Windows floods `change` events and pins a core. Both are
-   * caught below and answered by dropping the watcher and re-arming.
+   * Every directory at or under `root` (root included). One non-recursive watcher
+   * per directory is what lets live reload survive a spec dir being
+   * deleted+recreated (git checkout, spec regen): recursive `fs.watch` cannot,
+   * because Node 24's recursive watch on Linux goes silent once its root is
+   * removed. Depth/count guarded so a symlink loop cannot make the walk unbounded.
    */
-  function armSpecWatcher(dir: string): void {
-    if (stopped) return;
-    let watcher: FSWatcher;
-    const onEvent = (): void => {
-      onSpecChange();
-      // The Windows storm never emits `error`, so detect the vanished root
-      // here — synchronously, so the flood cannot outrun an async stat — and
-      // re-arm. This is the "re-arm on the next fs event" recovery path.
-      if (!existsSync(dir)) dropAndRearm(watcher, dir);
-    };
-    // Hand fs.watch the OS-canonical path so libuv's directory/filename prefix
-    // check holds on Node 24 (see canonicalPath) — a mismatch aborts the process.
-    const watchDir = canonicalPath(dir);
-    try {
-      watcher = watch(watchDir, { recursive: true }, onEvent);
-    } catch {
-      // tradeoff: `recursive` is unsupported on some platforms (older Linux,
-      // AIX). Falling back to a flat watch means edits in nested spec folders
-      // are missed until the next reload. Upgrade path: walk the tree and open
-      // one watcher per directory, refreshing on mkdir/rmdir.
+  function listSpecDirs(root: string): string[] {
+    const out: string[] = [];
+    const stack = [root];
+    while (stack.length > 0 && out.length < MAX_WATCHED_DIRS) {
+      const dir = stack.pop() as string;
+      out.push(dir);
+      let entries;
       try {
-        watcher = watch(watchDir, onEvent);
+        entries = readdirSync(dir, { withFileTypes: true });
       } catch {
-        // The dir is not there right now; poll for it to reappear rather than
-        // giving up on live reload for the rest of the session.
-        scheduleRearm(dir);
-        return;
+        continue; // vanished mid-walk, or unreadable — skip it
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) stack.push(join(dir, entry.name));
       }
     }
-    // Linux's fatal `error` on a deleted watched dir: recover instead of dying.
-    watcher.on('error', () => dropAndRearm(watcher, dir));
-    watchers.push(watcher);
-    armedDirs.set(dir, watcher);
+    return out;
   }
 
-  for (const dir of detected.specDirs) armSpecWatcher(dir);
+  let resyncTimer: NodeJS.Timeout | null = null;
+  /** Coalesce the re-sync that a burst of events (an `mkdir` of a subtree) would trigger. */
+  function scheduleResync(): void {
+    if (stopped || resyncTimer) return;
+    resyncTimer = setTimeout(() => {
+      resyncTimer = null;
+      resyncWatchers();
+    }, WATCH_DEBOUNCE_MS);
+    resyncTimer.unref();
+  }
 
-  // Safety net for the case fs.watch does not report at all (Node 24 recursive
-  // watch on Linux goes silent when its root is deleted): notice a vanished dir
-  // and re-arm. Deleting during iteration is safe; scheduleRearm re-adds async.
+  function watchDir(dir: string): void {
+    if (stopped || dirWatchers.has(dir) || !existsSync(dir)) return;
+    let watcher: FSWatcher;
+    try {
+      // canonicalPath keeps libuv's directory/filename prefix check happy on
+      // Windows (see canonicalPath). A created/removed subdir re-syncs the set.
+      watcher = watch(canonicalPath(dir), (_event, filename) => {
+        // A non-recursive dir watch reports a child's *relative* name. Windows can
+        // storm the watched dir with rename events naming the dir *itself* — an
+        // absolute path — which would reset the debounce forever and starve the
+        // `model` broadcast. Ignore those self-events; keep the real child edits.
+        if (typeof filename === 'string' && isAbsolute(filename)) return;
+        onSpecChange();
+        scheduleResync();
+      });
+    } catch {
+      return; // not watchable this instant; the sweep re-syncs and retries
+    }
+    watcher.on('error', () => {
+      // The directory likely vanished; drop it and let the re-sync re-add it if
+      // it returns. Never crash a long-lived server over a watch error.
+      if (dirWatchers.get(dir) === watcher) {
+        dirWatchers.delete(dir);
+        try {
+          watcher.close();
+        } catch {
+          // already gone
+        }
+      }
+      onSpecChange();
+      scheduleResync();
+    });
+    watcher.unref();
+    dirWatchers.set(dir, watcher);
+  }
+
+  /** Bring the watcher set in line with the tree on disk: add new dirs, drop gone ones. */
+  function resyncWatchers(): void {
+    if (stopped) return;
+    const wanted = new Set<string>();
+    for (const root of detected.specDirs) {
+      for (const dir of listSpecDirs(root)) wanted.add(dir);
+    }
+    for (const dir of wanted) watchDir(dir);
+    for (const [dir, watcher] of dirWatchers) {
+      if (wanted.has(dir)) continue;
+      dirWatchers.delete(dir);
+      try {
+        watcher.close();
+      } catch {
+        // already gone
+      }
+    }
+  }
+
+  resyncWatchers();
+
+  // A periodic re-sync recovers a delete+recreate that fs.watch did not report and
+  // picks up any subtree change missed between events.
   const specSweep = setInterval(() => {
     if (stopped) return;
-    for (const [dir, watcher] of armedDirs) {
-      if (!existsSync(dir)) dropAndRearm(watcher, dir);
-    }
+    resyncWatchers();
   }, SPEC_SWEEP_MS);
   specSweep.unref();
 
@@ -904,18 +920,17 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     port = await bind(server, host, opts.port);
   } catch (err) {
     // FIX 4: bind is the last allocation, so a taken port would otherwise leave
-    // the store, spec watchers and heartbeat live and the ref'd recursive
-    // watcher wedging process exit for a caller that caught this. Tear it all
-    // down before rethrowing.
+    // the store, spec watchers and heartbeat live, wedging process exit for a
+    // caller that caught this. Tear it all down before rethrowing.
     stopped = true;
     clearInterval(heartbeat);
     clearInterval(specSweep);
     if (debounce) clearTimeout(debounce);
-    for (const timer of rearmTimers) clearTimeout(timer);
-    rearmTimers.clear();
+    if (resyncTimer) clearTimeout(resyncTimer);
     unsubscribe();
     unsubscribeReview();
-    for (const watcher of watchers) watcher.close();
+    for (const watcher of dirWatchers.values()) watcher.close();
+    dirWatchers.clear();
     for (const stream of streams) stream.end();
     streams.clear();
     store.close();
@@ -935,11 +950,11 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
       clearInterval(heartbeat);
       clearInterval(specSweep);
       if (debounce) clearTimeout(debounce);
-      for (const timer of rearmTimers) clearTimeout(timer);
-      rearmTimers.clear();
+      if (resyncTimer) clearTimeout(resyncTimer);
       unsubscribe();
       unsubscribeReview();
-      for (const watcher of watchers) watcher.close();
+      for (const watcher of dirWatchers.values()) watcher.close();
+      dirWatchers.clear();
       for (const stream of streams) stream.end();
       streams.clear();
       store.close();

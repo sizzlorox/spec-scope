@@ -227,7 +227,14 @@ export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>): P
  */
 export function canonicalPath(p: string): string {
   try {
-    return realpathSync.native(p);
+    const real = realpathSync.native(p);
+    // realpathSync.native returns Windows' extended-length form (`\\?\C:\…` or
+    // `\\?\UNC\server\share`). The long names it resolves are exactly what libuv's
+    // prefix check needs, but fs.watch storms endlessly on the `\\?\` prefix
+    // itself — so strip the prefix back to the plain long path.
+    if (real.startsWith('\\\\?\\UNC\\')) return `\\\\${real.slice(8)}`;
+    if (real.startsWith('\\\\?\\')) return real.slice(4);
+    return real;
   } catch {
     return p;
   }
