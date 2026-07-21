@@ -57,6 +57,14 @@ const HEARTBEAT_MS = 25_000;
 const WATCH_DEBOUNCE_MS = 150;
 /** How often to retry a spec watcher whose directory vanished (git checkout). */
 const SPEC_REARM_MS = 500;
+/**
+ * How often to check that each watched spec dir still exists. Node 24's recursive
+ * `fs.watch` on Linux can go silent when the watched root is deleted — no `error`,
+ * no event — so the event-driven re-arm never fires. This poll notices the vanish
+ * and re-arms regardless. Kept shorter than a typical delete→recreate gap so a
+ * fast `git checkout` is not missed between ticks.
+ */
+const SPEC_SWEEP_MS = 250;
 
 /**
  * Static routes are an explicit map rather than a path join so a crafted URL
@@ -343,6 +351,8 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
   const publicBind = isPublicHost(host);
   const streams = new Set<ServerResponse>();
   const watchers: FSWatcher[] = [];
+  /** dir -> its live watcher, so the existence sweep can find and re-arm a vanished one. */
+  const armedDirs = new Map<string, FSWatcher>();
   /** Set once bind succeeds; requests only arrive after that, so never empty then. */
   let allowedAuthorities: ReadonlySet<string> = new Set();
   /** Flipped on teardown so a re-arming spec watcher cannot resurrect itself. */
@@ -413,6 +423,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     const index = watchers.indexOf(watcher);
     if (index < 0) return; // a racing event already handled this watcher
     watchers.splice(index, 1);
+    armedDirs.delete(dir);
     try {
       watcher.close();
     } catch {
@@ -463,9 +474,21 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     // Linux's fatal `error` on a deleted watched dir: recover instead of dying.
     watcher.on('error', () => dropAndRearm(watcher, dir));
     watchers.push(watcher);
+    armedDirs.set(dir, watcher);
   }
 
   for (const dir of detected.specDirs) armSpecWatcher(dir);
+
+  // Safety net for the case fs.watch does not report at all (Node 24 recursive
+  // watch on Linux goes silent when its root is deleted): notice a vanished dir
+  // and re-arm. Deleting during iteration is safe; scheduleRearm re-adds async.
+  const specSweep = setInterval(() => {
+    if (stopped) return;
+    for (const [dir, watcher] of armedDirs) {
+      if (!existsSync(dir)) dropAndRearm(watcher, dir);
+    }
+  }, SPEC_SWEEP_MS);
+  specSweep.unref();
 
   const heartbeat = setInterval(() => {
     for (const stream of streams) stream.write(': ping\n\n');
@@ -886,6 +909,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     // down before rethrowing.
     stopped = true;
     clearInterval(heartbeat);
+    clearInterval(specSweep);
     if (debounce) clearTimeout(debounce);
     for (const timer of rearmTimers) clearTimeout(timer);
     rearmTimers.clear();
@@ -909,6 +933,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     closing = (async () => {
       stopped = true;
       clearInterval(heartbeat);
+      clearInterval(specSweep);
       if (debounce) clearTimeout(debounce);
       for (const timer of rearmTimers) clearTimeout(timer);
       rearmTimers.clear();
