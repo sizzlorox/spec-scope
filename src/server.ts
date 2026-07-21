@@ -21,6 +21,7 @@ import { ReviewStore } from './review.js';
 import { blastRadius } from './blast.js';
 import { changeEntries } from './changes.js';
 import { explainWork } from './explainwork.js';
+import { canonicalPath } from './jsonfile.js';
 import { readVendor, type VendorAsset } from './vendor.js';
 import type {
   DecisionStatus,
@@ -440,15 +441,18 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
       // re-arm. This is the "re-arm on the next fs event" recovery path.
       if (!existsSync(dir)) dropAndRearm(watcher, dir);
     };
+    // Hand fs.watch the OS-canonical path so libuv's directory/filename prefix
+    // check holds on Node 24 (see canonicalPath) — a mismatch aborts the process.
+    const watchDir = canonicalPath(dir);
     try {
-      watcher = watch(dir, { recursive: true }, onEvent);
+      watcher = watch(watchDir, { recursive: true }, onEvent);
     } catch {
       // tradeoff: `recursive` is unsupported on some platforms (older Linux,
       // AIX). Falling back to a flat watch means edits in nested spec folders
       // are missed until the next reload. Upgrade path: walk the tree and open
       // one watcher per directory, refreshing on mkdir/rmdir.
       try {
-        watcher = watch(dir, onEvent);
+        watcher = watch(watchDir, onEvent);
       } catch {
         // The dir is not there right now; poll for it to reappear rather than
         // giving up on live reload for the rest of the session.
