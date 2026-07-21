@@ -13,6 +13,7 @@ import {
   closeSync,
   existsSync,
   openSync,
+  realpathSync,
   statSync,
   unlinkSync,
   watch,
@@ -215,6 +216,30 @@ export async function withFileLock<T>(lockPath: string, fn: () => Promise<T>): P
  * caller forgot to close cannot wedge process exit, and its `error` events are
  * swallowed rather than crashing a long-lived server.
  */
+/**
+ * The OS-canonical form of a path, or the input unchanged when it cannot be
+ * resolved (it may not exist yet). On Windows this expands 8.3 short-name
+ * components (e.g. `RUNNER~1`) to their long form. `fs.watch` must be handed the
+ * canonical path: libuv compares the directory it was given against the long-form
+ * paths `ReadDirectoryChangesW` reports, and on Node 24 a mismatch trips a fatal
+ * assertion (`!_wcsnicmp(filename, dir, dirlen)`) that aborts the process — which
+ * no `error` handler can catch. Canonicalising first keeps the prefixes equal.
+ */
+export function canonicalPath(p: string): string {
+  try {
+    const real = realpathSync.native(p);
+    // realpathSync.native returns Windows' extended-length form (`\\?\C:\…` or
+    // `\\?\UNC\server\share`). The long names it resolves are exactly what libuv's
+    // prefix check needs, but fs.watch storms endlessly on the `\\?\` prefix
+    // itself — so strip the prefix back to the plain long path.
+    if (real.startsWith('\\\\?\\UNC\\')) return `\\\\${real.slice(8)}`;
+    if (real.startsWith('\\\\?\\')) return real.slice(4);
+    return real;
+  } catch {
+    return p;
+  }
+}
+
 export function watchJsonDir(
   dir: string,
   onChange: () => void,
@@ -228,7 +253,7 @@ export function watchJsonDir(
   const attach = (): void => {
     if (closed || watcher !== null) return;
     const dirExists = existsSync(dir);
-    const target = dirExists ? dir : parent;
+    const target = canonicalPath(dirExists ? dir : parent);
     let swapped = false;
     let w: FSWatcher;
     try {
