@@ -1,0 +1,473 @@
+{
+  "version": 1,
+  "decisions": [
+    {
+      "id": "dec_mru1vi5y9mlx4",
+      "title": "Enforce expiry both lazily and by a sweep",
+      "context": "A join link must never admit anyone after its expiry, but a background sweep runs on a schedule and could lag.",
+      "options": [
+        "Sweep only — a periodic job marks past-window invitations expired",
+        "Lazy only — treat a past expiresAt as expired on read",
+        "Both — lazy check for correctness, sweep to keep the table tidy"
+      ],
+      "choice": "Do both: evaluate expiry on read so correctness never depends on the sweep, and keep the sweep to move stale rows to the expired state.",
+      "tradeoffs": "A little duplicated logic and one extra read-time check, in exchange for correctness that is independent of the sweep’s schedule.",
+      "consequence": "A link is refused the instant it is past expiry, even if the sweep has not run yet.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "doc",
+          "anchor": "doc:specs-001-team-invites-plan-md",
+          "label": "plan.md"
+        }
+      ],
+      "status": "recorded",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "dec_mru1vi5y92pp2",
+      "title": "Accepting an invitation is idempotent",
+      "context": "Recipients double-click links and email clients pre-fetch them, so an accept endpoint can be hit twice.",
+      "options": [
+        "Create a membership per accept call",
+        "Create exactly one membership and treat later accepts as no-ops"
+      ],
+      "choice": "Accepting creates exactly one membership; a second accept on an already-accepted invitation changes nothing.",
+      "tradeoffs": "Accept must re-check state inside the write, costing one guarded transaction, to rule out duplicate memberships.",
+      "consequence": "Opening the join link twice can never place someone in the workspace twice.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-008",
+          "label": "FR-008"
+        }
+      ],
+      "status": "recorded",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    }
+  ],
+  "stamps": [],
+  "explanations": [
+    {
+      "id": "exp_mru1vi5x6uqri",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-1-invite-a-teammate",
+      "anchorLabel": "User Story 1 - Invite a teammate",
+      "kind": "summary",
+      "body": "An admin adds a teammate by entering an email address and choosing one role; the system creates a pending invitation and emails a join link, so the teammate joins without the admin handling their password or making the account for them.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-1-invite-a-teammate",
+          "label": "User Story 1 - Invite a teammate"
+        }
+      ],
+      "specHash": "1f629bc474b07d2d",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.957Z"
+    },
+    {
+      "id": "exp_mru1vi5y22rrg",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-1-invite-a-teammate/scn:acceptance",
+      "anchorLabel": "User Story 1 - Invite a teammate / Acceptance",
+      "kind": "narration",
+      "body": "Given an admin on the members page: submitting a valid email with the role \"Editor\" creates a pending invitation and sends a join-link email to that address. When the recipient opens the link while signed out, they are asked to sign in or register, and on success become an Editor of the workspace. If the email already belongs to a member, the repeat invitation is rejected with an \"already a member\" message.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-1-invite-a-teammate/scn:acceptance",
+          "label": "User Story 1 - Invite a teammate / Acceptance"
+        }
+      ],
+      "specHash": "31a05e28aa098000",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y6uz25",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-2-revoke-an-invitation",
+      "anchorLabel": "User Story 2 - Revoke an invitation",
+      "kind": "summary",
+      "body": "An admin cancels a pending invitation so its link stops admitting anyone — the take-back the constitution requires before an access grant is used.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-2-revoke-an-invitation",
+          "label": "User Story 2 - Revoke an invitation"
+        }
+      ],
+      "specHash": "56da5bf61a602270",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y2f361",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-2-revoke-an-invitation/scn:acceptance",
+      "anchorLabel": "User Story 2 - Revoke an invitation / Acceptance",
+      "kind": "narration",
+      "body": "Given a pending invitation: when the admin revokes it, its status becomes revoked and the join link no longer admits anyone. A recipient who then opens the link is told the invitation is no longer valid and is not added to the workspace.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-2-revoke-an-invitation/scn:acceptance",
+          "label": "User Story 2 - Revoke an invitation / Acceptance"
+        }
+      ],
+      "specHash": "317ba9a450c479ee",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y6l24d",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-3-invitations-expire-on-their-own",
+      "anchorLabel": "User Story 3 - Invitations expire on their own",
+      "kind": "summary",
+      "body": "An invitation that is never opened stops working after a fixed window (default 7 days), so a forgotten or leaked link cannot be used months later.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-3-invitations-expire-on-their-own",
+          "label": "User Story 3 - Invitations expire on their own"
+        }
+      ],
+      "specHash": "5d152c73a638092b",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y4c63b",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-3-invitations-expire-on-their-own/scn:acceptance",
+      "anchorLabel": "User Story 3 - Invitations expire on their own / Acceptance",
+      "kind": "narration",
+      "body": "Given an invitation created 8 days ago under a 7-day window: opening its link is refused as expired and no membership is created.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:user-story-3-invitations-expire-on-their-own/scn:acceptance",
+          "label": "User Story 3 - Invitations expire on their own / Acceptance"
+        }
+      ],
+      "specHash": "13dc840e91a62a01",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y238qp",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:functional-requirements",
+      "anchorLabel": "Functional Requirements",
+      "kind": "summary",
+      "body": "The eight requirements below fix who may create an invitation, how a join link behaves across its whole lifecycle, and what every state change must record.",
+      "provenance": "inferred",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:functional-requirements",
+          "label": "Functional Requirements"
+        }
+      ],
+      "specHash": "7ca7fa1f81abf533",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y3x8iy",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-001",
+      "anchorLabel": "FR-001",
+      "kind": "summary",
+      "body": "An admin creates an invitation for one email address with exactly one role drawn from the workspace’s existing role set.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-001",
+          "label": "FR-001"
+        }
+      ],
+      "specHash": "2cb924bbd4d5b1ad",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y7vi8m",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-002",
+      "anchorLabel": "FR-002",
+      "kind": "summary",
+      "body": "The system emails the invited address a single-use join link bound to that specific invitation.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-002",
+          "label": "FR-002"
+        }
+      ],
+      "specHash": "be183ad0705ba9ed",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y8bupk",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-003",
+      "anchorLabel": "FR-003",
+      "kind": "summary",
+      "body": "An invitation is rejected when its email already belongs to a member of the same workspace — you cannot invite someone who is already in.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-003",
+          "label": "FR-003"
+        }
+      ],
+      "specHash": "811c1e4ee1aef855",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y5lxl4",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-004",
+      "anchorLabel": "FR-004",
+      "kind": "summary",
+      "body": "A join link admits its recipient only while the invitation is pending; accepted, revoked and expired invitations each refuse it.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-004",
+          "label": "FR-004"
+        }
+      ],
+      "specHash": "0bd39a50a973fa11",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y2se2r",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-005",
+      "anchorLabel": "FR-005",
+      "kind": "summary",
+      "body": "An admin can revoke a pending invitation, after which its link is refused.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-005",
+          "label": "FR-005"
+        }
+      ],
+      "specHash": "287201a7380a3a47",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y16lhh",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-006",
+      "anchorLabel": "FR-006",
+      "kind": "summary",
+      "body": "An invitation expires automatically after a window measured from its creation, configurable and defaulting to 7 days.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-006",
+          "label": "FR-006"
+        }
+      ],
+      "specHash": "ac2c23c2a5f30daf",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y2d180",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-007",
+      "anchorLabel": "FR-007",
+      "kind": "summary",
+      "body": "Every invitation state change — created, accepted, revoked, expired — is written to the audit log with the actor and a timestamp.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-007",
+          "label": "FR-007"
+        }
+      ],
+      "specHash": "f94439a8c9342180",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y1atbt",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-008",
+      "anchorLabel": "FR-008",
+      "kind": "summary",
+      "body": "Accepting an invitation creates exactly one membership carrying the invitation’s role, even if the link is opened twice — acceptance is idempotent.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-008",
+          "label": "FR-008"
+        }
+      ],
+      "specHash": "f12512bbb2dd7ebf",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "exp_mru1vi5y418aa",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:key-entities-include-if-feature-involves-data",
+      "anchorLabel": "Key Entities *(include if feature involves data)*",
+      "kind": "summary",
+      "body": "The feature rests on four things: a Workspace that owns invitations and memberships; an Invitation holding the target email, offered role, single-use token, status and expiry; a Membership created when an invitation is accepted; and a Role the invitation offers and the membership carries.",
+      "provenance": "inferred",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:key-entities-include-if-feature-involves-data",
+          "label": "Key Entities *(include if feature involves data)*"
+        }
+      ],
+      "specHash": "98266dc4c33d0b91",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    }
+  ],
+  "glossary": [
+    {
+      "id": "term_mru1vi5y91cl1",
+      "term": "single-use join link",
+      "definition": "The link emailed to an invited address; it carries the invitation’s token and admits the recipient exactly once, only while the invitation is pending.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-002",
+          "label": "FR-002"
+        }
+      ],
+      "defined": true,
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "term_mru1vi5y8zduc",
+      "term": "pending",
+      "definition": "The state an invitation starts in and the only state in which its link admits anyone; accepted, revoked and expired are the terminal states.",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-004",
+          "label": "FR-004"
+        }
+      ],
+      "defined": true,
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "term_mru1vi5y3ka0c",
+      "term": "role set",
+      "definition": "",
+      "provenance": "unstated",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-001",
+          "label": "FR-001"
+        }
+      ],
+      "defined": false,
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    }
+  ],
+  "diagrams": [
+    {
+      "id": "diag_mru1vi5y5u4l9",
+      "title": "Creating and accepting an invitation",
+      "type": "sequence",
+      "anchor": "doc:specs-001-team-invites-spec-md",
+      "anchorLabel": "Feature Specification: Team Invitations",
+      "covers": [
+        "doc:specs-001-team-invites-spec-md/req:user-story-1-invite-a-teammate",
+        "doc:specs-001-team-invites-spec-md/req:user-story-1-invite-a-teammate/scn:acceptance"
+      ],
+      "mermaid": "%% Invitation: create then accept\nsequenceDiagram\n  autonumber\n  participant Admin as Admin Browser\n  participant API as Harbor API\n  participant Mail as Email Service\n  participant Invitee as Invitee Browser\n  Admin->>API: POST create invitation, email + role\n  API->>API: validate role, reject if already a member\n  API->>Mail: send single-use join link\n  API-->>Admin: pending invitation\n  Invitee->>API: GET invitation by token\n  API-->>Invitee: accept page if pending and unexpired\n  Invitee->>API: POST accept\n  API->>API: create one membership, mark accepted\n  API-->>Invitee: redirect into workspace",
+      "trigger": "request/response across >=2 named participants (admin, API, email service, invitee)",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-002",
+          "label": "FR-002"
+        },
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-008",
+          "label": "FR-008"
+        }
+      ],
+      "specHash": "9faafc8bda885c82",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.958Z"
+    },
+    {
+      "id": "diag_mru1vi5z4lsla",
+      "title": "Invitation lifecycle",
+      "type": "state",
+      "anchor": "doc:specs-001-team-invites-spec-md",
+      "anchorLabel": "Feature Specification: Team Invitations",
+      "covers": [
+        "doc:specs-001-team-invites-spec-md/req:fr-004",
+        "doc:specs-001-team-invites-spec-md/req:fr-005",
+        "doc:specs-001-team-invites-spec-md/req:fr-006"
+      ],
+      "mermaid": "%% Invitation status transitions\nstateDiagram-v2\n  [*] --> pending: admin creates\n  pending --> accepted: invitee joins\n  pending --> revoked: admin cancels\n  pending --> expired: window passes\n  accepted --> [*]\n  revoked --> [*]\n  expired --> [*]",
+      "trigger": "an entity with enumerated statuses + transitions (pending -> accepted/revoked/expired)",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:fr-004",
+          "label": "FR-004"
+        }
+      ],
+      "specHash": "9faafc8bda885c82",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.959Z"
+    },
+    {
+      "id": "diag_mru1vi5z4fcgw",
+      "title": "Invitations data model",
+      "type": "er",
+      "anchor": "doc:specs-001-team-invites-spec-md",
+      "anchorLabel": "Feature Specification: Team Invitations",
+      "covers": [
+        "doc:specs-001-team-invites-spec-md/req:key-entities-include-if-feature-involves-data"
+      ],
+      "mermaid": "%% Workspace / Invitation / Membership\nerDiagram\n  WORKSPACE ||--o{ INVITATION : owns\n  WORKSPACE ||--o{ MEMBERSHIP : has\n  INVITATION ||--o| MEMBERSHIP : produces\n  WORKSPACE {\n    string id\n    string name\n  }\n  INVITATION {\n    string id\n    string email\n    string role\n    string token\n    string status\n    datetime expiresAt\n  }\n  MEMBERSHIP {\n    string id\n    string userId\n    string role\n    datetime joinedAt\n  }",
+      "trigger": "a data model: entities + fields + cardinality (Workspace 1-* Invitation/Membership)",
+      "provenance": "grounded",
+      "sources": [
+        {
+          "kind": "requirement",
+          "anchor": "doc:specs-001-team-invites-spec-md/req:key-entities-include-if-feature-involves-data",
+          "label": "Key Entities"
+        }
+      ],
+      "specHash": "9faafc8bda885c82",
+      "author": "agent",
+      "createdAt": "2026-07-21T02:44:27.959Z"
+    }
+  ],
+  "diagramSkips": []
+}

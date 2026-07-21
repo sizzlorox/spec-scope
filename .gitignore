@@ -33,3 +33,6 @@ coverage/
 
 # spec-scope's own discussion store (created when the tool runs against a project)
 .spec-scope/
+# …except the bundled example's prepared review, so `spec-scope examples/harbor`
+# opens on the populated report out of the box.
+!examples/harbor/.spec-scope/

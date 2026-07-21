@@ -37,6 +37,8 @@ That detects the flavor, parses the spec tree, generates diagrams, and opens `ht
 npm install --save-dev spec-scope
 ```
 
+No project handy? A prepared example ships with the repo — run `spec-scope examples/harbor` (or `node bin/spec-scope.js examples/harbor` in this checkout) to open on the populated report shown in the [screenshots](#screenshots) below. See [`examples/harbor`](./examples/harbor).
+
 ## Commands
 
 | Command                             | What it does                                                                       |

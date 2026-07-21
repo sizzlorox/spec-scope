@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "notes": [
+    {
+      "id": "note_mru1yejg2w9ho",
+      "anchor": "doc:specs-001-team-invites-spec-md/req:fr-003",
+      "anchorLabel": "Feature Specification: Team Invitations › FR-003",
+      "kind": "question",
+      "body": "Should a still-pending invitation to this email also block a re-invite, or only an existing membership? FR-003 says \"already a member\" — a pending invite isn't a member yet.",
+      "author": "human",
+      "createdAt": "2026-07-21T02:46:43.228Z",
+      "status": "open",
+      "replies": []
+    }
+  ]
+}

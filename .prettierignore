@@ -9,5 +9,9 @@ package-lock.json
 # Parser tests assert on exact whitespace — reformatting these breaks them
 test/fixtures
 
+# Bundled example: real-world spec files + a machine-generated review store,
+# not project source — leave their formatting as authored / emitted
+examples
+
 # Owned by release-please
 CHANGELOG.md
