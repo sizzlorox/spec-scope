@@ -285,15 +285,27 @@ Full grammar for both dialects, including what is deliberately ignored, is in [`
 
 ## Screenshots
 
-> **Note:** the images below are placeholders. `docs/media/` is not populated yet — contributions welcome, see [CONTRIBUTING.md](./CONTRIBUTING.md).
+_The spec shown below — a "Team Invitations" feature — comes from running a real Spec Kit flow through spec-scope end to end: `specify init`, a constitution, a spec/plan/tasks, then an agent-prepared review._
 
-|                           |                                                 |
-| ------------------------- | ----------------------------------------------- |
-| `docs/media/overview.png` | The spec tree with a generated requirement map. |
-| `docs/media/sequence.png` | A scenario rendered as a sequence chart.        |
-| `docs/media/notes.png`    | Attaching a note to a requirement.              |
-| `docs/media/review.png`   | The plain layer and decision ledger.            |
-| `docs/media/techdoc.png`  | An exported one-file tech doc.                  |
+**Report view** — the spec as an executive summary. The default reading density leads with the at-a-glance counts and the decisions that shaped the spec, then lists every requirement as one line of plain language. (Cycle to Digest or Full for the cards and the formal text.)
+
+![The report view: at-a-glance counts and the decision ledger surfaced above a compact requirement list](./docs/media/overview.jpg)
+
+**Authored diagrams** — the agent draws a sequence, state or ER diagram when a structure earns one, each carrying its own provenance.
+
+![A scenario rendered as a sequence chart, authored by the agent](./docs/media/sequence.jpg)
+
+**Discussion** — ask a question or request a change on any requirement; the thread queues for the in-loop agent to answer.
+
+![A reviewer question attached to a requirement, shown in the discussion panel](./docs/media/notes.jpg)
+
+**Decision ledger** — every recorded decision with its context, the options weighed, the choice, and what it traded away.
+
+![The decision ledger](./docs/media/review.jpg)
+
+**One-file tech doc** — `spec-scope export` writes a single self-contained HTML report you can hand to anyone.
+
+![An exported one-file tech doc](./docs/media/techdoc.jpg)
 
 ## Privacy and security
 

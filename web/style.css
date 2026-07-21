@@ -1742,6 +1742,83 @@ kbd {
   gap: 0.15rem;
 }
 
+/* ---------- report mode (executive summary) ---------- */
+
+.report-decisions,
+.report-list {
+  max-width: 62rem;
+  margin-bottom: 1.4rem;
+}
+
+.report-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.7rem;
+}
+
+.report-section-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.report-section-count {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-faint);
+  background: var(--bg-sunken);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.report-decisions .decision-card {
+  margin-bottom: 0.7rem;
+}
+
+.report-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.report-row:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.report-row > .anchor-head {
+  margin: 0;
+}
+
+.report-row > .anchor-head .anchor-select {
+  font-size: 0.98rem;
+  font-weight: 600;
+}
+
+.report-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding-left: 0.35rem;
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.report-summary-body {
+  flex: 1;
+}
+
+.report-summary-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.report-summary-unstated .report-summary-body {
+  color: var(--text-muted);
+}
+
 /* ---------- normative intro prose ---------- */
 
 .doc-intro {

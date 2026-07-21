@@ -34,11 +34,13 @@ const state = {
   /** 'doc' | 'decisions' | 'changes' | 'glossary' */
   view: 'doc',
   /**
-   * Reading density. 'digest' (default) collapses each requirement to a
-   * summary-first card and hides formal text + diagrams behind one click;
-   * 'full' expands every card and shows the formal text.
+   * Reading density, cycled report -> digest -> full. 'report' (default) is the
+   * executive summary: the at-a-glance card, decisions surfaced up top, every
+   * requirement as a one-line plain summary, and the diagrams behind a
+   * disclosure. 'digest' gives each requirement a summary-first card with formal
+   * text one click away; 'full' expands every card and opens the diagrams.
    */
-  density: 'digest',
+  density: 'report',
   /** Anchors whose card the reviewer expanded by hand, so it survives a re-render. */
   expandedCards: new Set(),
   /** 'auto' | 'light' | 'dark' */
@@ -1293,7 +1295,7 @@ function authoredDiagramSignature(doc) {
  * in a view a newer render replaced. A stale authored diagram renders WITH its stale
  * marker; only a doc with none falls through to the affordance or the skip note.
  */
-function authoredDiagramsSection(doc, seq) {
+function authoredDiagramsSection(doc, seq, collapsed = false) {
   const authored = authoredDiagramsFor(doc.id);
   const task = diagramTaskFor(doc.id);
   const skip = diagramSkipFor(doc.id);
@@ -1310,24 +1312,50 @@ function authoredDiagramsSection(doc, seq) {
   eyebrow.append(aiMark());
   eyebrow.append(el('span', null, 'authored by the agent'));
   head.append(eyebrow);
+
+  const canCollapse = collapsed && authored.length > 0;
+  const toggle = canCollapse
+    ? button(`Show diagrams (${authored.length})`, 'diagrams-toggle')
+    : null;
+  if (toggle) head.append(toggle);
   section.append(head);
 
   if (authored.length) {
     const holder = el('div', 'authored-diagrams-holder');
     section.append(holder);
-    const cards = [];
-    for (const diagram of authored) {
-      const { card, body } = authoredDiagramCard(diagram, stale);
-      holder.append(card);
-      cards.push({ body, diagram });
-    }
-    // Sequential on purpose: mermaid mutates shared document state per render.
-    void (async () => {
-      for (const entry of cards) {
-        if (seq !== state.renderSeq) return; // a newer render took over
-        await drawDiagram(entry.body, entry.diagram);
+    // Build + draw is deferred behind `build` so a collapsed holder never draws at
+    // zero width (mermaid needs a laid-out box). Same pattern as docDiagramsSection.
+    let built = false;
+    const build = () => {
+      if (built) return;
+      built = true;
+      const cards = [];
+      for (const diagram of authored) {
+        const { card, body } = authoredDiagramCard(diagram, stale);
+        holder.append(card);
+        cards.push({ body, diagram });
       }
-    })();
+      // Sequential on purpose: mermaid mutates shared document state per render.
+      void (async () => {
+        for (const entry of cards) {
+          if (seq !== state.renderSeq) return; // a newer render took over
+          await drawDiagram(entry.body, entry.diagram);
+        }
+      })();
+    };
+    if (canCollapse) {
+      holder.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.addEventListener('click', () => {
+        const open = holder.hidden;
+        holder.hidden = !open;
+        toggle.textContent = open ? 'Hide diagrams' : `Show diagrams (${authored.length})`;
+        toggle.setAttribute('aria-expanded', String(open));
+        if (open) build();
+      });
+    } else {
+      build();
+    }
   } else if (task) {
     section.append(needsDiagramAffordance(doc));
   } else if (skip) {
@@ -1347,7 +1375,8 @@ function refreshAuthoredDiagrams(doc) {
   const old = els.doc.querySelector('.authored-diagrams');
   const sig = authoredDiagramSignature(doc);
   if (old && old.dataset.sig === sig) return;
-  const fresh = authoredDiagramsSection(doc, seq);
+  // Keep report mode's collapsed appendix collapsed when a live update rebuilds it.
+  const fresh = authoredDiagramsSection(doc, seq, state.density === 'report');
   if (old && fresh) {
     old.replaceWith(fresh);
     flashNode(fresh);
@@ -1513,13 +1542,23 @@ async function renderDoc() {
   const digest = docDigestCard(doc);
   if (digest) els.doc.append(digest);
 
-  // The agent's authored diagrams (the high-value ones) sit prominently right below
-  // the digest — above the requirement cards, distinct from the derived maps that
-  // live behind an on-demand disclosure at the foot of the doc.
-  const authoredSection = authoredDiagramsSection(doc, seq);
-  if (authoredSection) els.doc.append(authoredSection);
-
+  const report = state.density === 'report';
   const requirements = doc.requirements || [];
+
+  // Report mode is an executive summary: surface the decisions right under the
+  // at-a-glance, before the requirement list. In digest/full they stay in the tab.
+  if (report && requirements.length) {
+    const decisions = reportDecisionsSection();
+    if (decisions) els.doc.append(decisions);
+  }
+
+  // The agent's authored diagrams (the high-value ones) sit prominently right below
+  // the digest in digest/full — above the requirement cards, distinct from the
+  // derived maps at the foot. In report mode they move to a collapsed appendix so
+  // the summary reads first; `report` collapses them and defers drawing to expand.
+  const authoredSection = authoredDiagramsSection(doc, seq, report);
+  if (authoredSection && !report) els.doc.append(authoredSection);
+
   if (requirements.length) {
     // Human-authored intro prose (a Purpose / overview) is normative context, not
     // AI, and the parser does not fold it into any req.text — render it once, up
@@ -1527,27 +1566,115 @@ async function renderDoc() {
     const intro = docIntro(doc);
     if (intro) els.doc.append(intro);
 
-    const list = el('div', 'req-cards');
-    let prevDelta = null;
-    for (const req of requirements) {
-      if (req.delta && req.delta !== prevDelta) list.append(deltaGroupLabel(req.delta));
-      if (req.delta) prevDelta = req.delta;
-      list.append(requirementCard(doc, req));
+    if (report) {
+      els.doc.append(reportList(doc, requirements));
+    } else {
+      const list = el('div', 'req-cards');
+      let prevDelta = null;
+      for (const req of requirements) {
+        if (req.delta && req.delta !== prevDelta) list.append(deltaGroupLabel(req.delta));
+        if (req.delta) prevDelta = req.delta;
+        list.append(requirementCard(doc, req));
+      }
+      els.doc.append(list);
     }
-    els.doc.append(list);
   } else {
     // A pure-prose doc (proposal / plan / design / tasks) has no requirements to
-    // card up: render its Markdown faithfully, exactly as before.
+    // card up: render its Markdown faithfully, exactly as before. Report mode falls
+    // through here too — there is no requirement list to summarise.
     const body = el('article', 'doc-body');
     body.append(renderMarkdown(doc.markdown));
     els.doc.append(body);
   }
+
+  // In report mode the authored diagrams follow the summary as a collapsed appendix.
+  if (authoredSection && report) els.doc.append(authoredSection);
 
   // Diagrams are an on-demand layer: the structural maps (requirement / heat map,
   // task flow, group overview) live behind one disclosure so Digest mode does not
   // dump them; the per-scenario sequences live inside their scenario cards.
   const docDiagrams = diagramsForDoc(doc).filter((d) => d.kind !== 'sequence');
   if (docDiagrams.length) els.doc.append(docDiagramsSection(doc, docDiagrams, seq));
+}
+
+/** A titled section head with a count chip, shared by the report Decisions / Requirements blocks. */
+function reportSectionHead(title, count) {
+  const head = el('div', 'report-section-head');
+  head.append(el('h3', null, title));
+  head.append(el('span', 'report-section-count', String(count)));
+  return head;
+}
+
+/**
+ * The recorded decisions, surfaced inside the report so the reader sees the choices
+ * that shaped the spec without leaving for the Decisions tab. Superseded ones are
+ * left out — the ledger tab is where their history lives. Reuses `decisionCard`.
+ */
+function reportDecisionsSection() {
+  const decisions = ((state.review && state.review.decisions) || []).filter(
+    (d) => d.status !== 'superseded'
+  );
+  if (!decisions.length) return null;
+  const section = el('section', 'report-decisions');
+  section.append(reportSectionHead('Decisions', decisions.length));
+  for (const decision of decisions) section.append(decisionCard(decision));
+  return section;
+}
+
+/** The requirement list as a compact, scannable report — one plain-summary line each. */
+function reportList(doc, requirements) {
+  const section = el('section', 'report-list');
+  section.append(reportSectionHead('Requirements', requirements.length));
+  let prevDelta = null;
+  for (const req of requirements) {
+    if (req.delta && req.delta !== prevDelta) section.append(deltaGroupLabel(req.delta));
+    if (req.delta) prevDelta = req.delta;
+    section.append(reportRow(doc, req));
+  }
+  return section;
+}
+
+/**
+ * One requirement as a report row: the selectable, badged heading (so notes,
+ * verdicts and selection all still work, and the SSE badge repaint finds its
+ * `.anchor-head`) over a single plain-summary line. No formal text, scenarios or
+ * action bar — those belong to the denser reading modes.
+ */
+function reportRow(doc, req) {
+  const hit = reqHit(doc, req);
+  const row = el('div', 'report-row');
+  row.dataset.anchor = req.id;
+  const head = anchorHead(hit, 'h4');
+  const scenarios = req.scenarios || [];
+  if (scenarios.length) {
+    head.append(
+      el(
+        'span',
+        'badge badge-quiet',
+        `${scenarios.length} scenario${scenarios.length === 1 ? '' : 's'}`
+      )
+    );
+  }
+  row.append(head);
+  row.append(reportSummaryLine(req.id));
+  return row;
+}
+
+/** The one-line plain summary for a report row: provenance chip + body, or an honest gap. */
+function reportSummaryLine(anchor) {
+  const explanation = explanationFor(anchor, 'summary');
+  const line = el('div', 'report-summary');
+  if (!explanation) {
+    line.classList.add('report-summary-empty');
+    line.append(el('span', null, 'Not yet explained'));
+    return line;
+  }
+  const unstated = explanation.provenance === 'unstated';
+  if (unstated) line.classList.add('report-summary-unstated');
+  line.append(provenanceBadge(explanation.provenance));
+  const body = unstated ? `The spec does not state this — ${explanation.body}` : explanation.body;
+  line.append(el('span', 'report-summary-body', body));
+  return line;
 }
 
 /** A scannable group label (ADDED / MODIFIED / …) shown when a delta section starts. */
@@ -2896,27 +3023,31 @@ function refreshReviewInDoc() {
 
 // ------------------------------------------------ reading density
 
+/** report -> digest -> full -> report, so the toggle cycles all three. */
+const DENSITY_NEXT = { report: 'digest', digest: 'full', full: 'report' };
+const DENSITY_LABEL = { report: 'Report', digest: 'Digest', full: 'Full' };
+
 function loadDensity() {
   try {
     const stored = window.localStorage.getItem(DENSITY_KEY);
-    if (stored === 'digest' || stored === 'full') state.density = stored;
+    if (stored === 'report' || stored === 'digest' || stored === 'full') state.density = stored;
   } catch {
-    // storage unavailable; default to digest
+    // storage unavailable; default to report
   }
 }
 
 function applyDensityLabel() {
-  const full = state.density === 'full';
-  els.densityToggle.textContent = full ? 'Density: Full' : 'Density: Digest';
-  els.densityToggle.setAttribute('aria-pressed', String(full));
+  const next = DENSITY_NEXT[state.density];
+  els.densityToggle.textContent = `Density: ${DENSITY_LABEL[state.density]}`;
+  els.densityToggle.setAttribute('aria-pressed', String(state.density !== 'report'));
   els.densityToggle.setAttribute(
     'aria-label',
-    `Reading density: ${state.density}. Click to switch to ${full ? 'digest' : 'full'}.`
+    `Reading density: ${state.density}. Click to switch to ${next}.`
   );
 }
 
 function toggleDensity() {
-  state.density = state.density === 'full' ? 'digest' : 'full';
+  state.density = DENSITY_NEXT[state.density] || 'report';
   try {
     window.localStorage.setItem(DENSITY_KEY, state.density);
   } catch {
