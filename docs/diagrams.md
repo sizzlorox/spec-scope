@@ -104,6 +104,30 @@ fails — no partial write:
 3. **At most 24 nodes** — the legibility ceiling. Past it, **split** into more than one diagram at a
    tighter altitude (e.g. one sequence per endpoint instead of one for a whole service).
 
+These floors check the header and node count — **not** whether the body actually parses. Getting the ids
+right (below) is the author's job; a bad id passes `apply` and only fails later, at render.
+
+## Naming the ids
+
+Every id you introduce — a `sequence` participant, a `state`, an `er` entity, a `flowchart`/`class` node —
+is a **token Mermaid parses**, not a label. Use a short alphanumeric id and keep the readable name in
+`as <Label>`. Above all, an id must never be a Mermaid keyword: `note`, `end`, `alt`, `else`, `opt`,
+`loop`, `par`, `and`, `rect`, `over`, `activate`, `deactivate`, `as`, `participant`, `actor`. A keyword id
+does not error on `apply` — it silently fails to render, showing an error card instead of a diagram. The
+classic trap is a "notification" lane named `Note`: `participant Note as …` parses, but the message
+`Note-->>User: …` is read as a `Note` statement and the whole diagram breaks. Name it `SVNote` (or
+anything non-keyword) and put "notification" in the label.
+
+```mermaid
+sequenceDiagram
+    participant User as User
+    participant SVC as Payment service
+    participant SVNote as ShadowVault notification
+    User->>SVC: submit payment
+    SVC->>SVNote: post result on own channel
+    SVNote-->>User: "New code from [App]"
+```
+
 ## The shapes the agent writes
 
 Both types live in `.spec-scope/review.json` and are defined in [`../src/types.ts`](../src/types.ts).
