@@ -61,6 +61,9 @@ const DIAGRAM_RUBRIC =
   'TWO ALTITUDES: consolidate aggregate structures into ONE diagram spanning many scenarios ' +
   '(one state machine per entity, one ER for the whole data model, one sequence per endpoint) — ' +
   'never one per scenario. ' +
+  'Every id you introduce (participant/state/entity/node) must be a short alphanumeric token that is ' +
+  'NOT a Mermaid keyword (e.g. note, end, alt, else, opt, loop, par, and, over, activate, actor, as); ' +
+  'put the human name in `as <Label>` — a keyword id like `Note` silently fails to render. ' +
   'Author each with anchor = this doc id, covers = the specific requirement/scenario ids it depicts, ' +
   'type, a one-line trigger (which signal fired), honest provenance, specHash copied from THIS task. ' +
   'If nothing warrants a diagram, record a diagramSkip {anchor: doc id, specHash: this task’s, reason} — ' +
