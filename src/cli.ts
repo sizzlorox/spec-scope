@@ -113,7 +113,7 @@ function readVersion(): string {
 
 function resolveDir(input: string | undefined): string {
   const dir = resolve(input ?? '.');
-  let isDir = false;
+  let isDir: boolean;
   try {
     isDir = statSync(dir).isDirectory();
   } catch {
@@ -593,7 +593,8 @@ function parseBatch(raw: string): ReviewBatch {
     parsed = JSON.parse(raw);
   } catch (err) {
     throw new Error(
-      `could not parse batch as JSON: ${err instanceof Error ? err.message : String(err)}`
+      `could not parse batch as JSON: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
     );
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

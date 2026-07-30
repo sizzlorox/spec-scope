@@ -23,6 +23,9 @@ updates:
         dependency-type: development
         patterns:
           - "eslint*"
+          # `eslint*` does not match a scoped name — @eslint/js needs its own
+          # pattern or it arrives as a separate PR that breaks the config load.
+          - "@eslint/*"
           - "typescript-eslint"
           - "prettier*"
           - "@types/*"
@@ -33,6 +36,15 @@ updates:
       - dependency-name: mermaid
         update-types: ["version-update:semver-major"]
       - dependency-name: marked
+        update-types: ["version-update:semver-major"]
+      # @types/node tracks the lowest Node this package supports (engines.node),
+      # not the newest release. Newer types would let node-26-only APIs compile
+      # and then ship broken to a node 22 user. Bump this with engines, not before.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # typescript-eslint 8.x pins its typescript peer below 6.1. Until it
+      # supports TS 7, a major bump here only produces an unresolvable install.
+      - dependency-name: typescript
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
