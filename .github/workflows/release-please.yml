@@ -19,7 +19,7 @@ jobs:
     steps:
       # Maintains a rolling release PR from Conventional Commits. Merging that PR
       # bumps the version, writes CHANGELOG.md, tags, and creates the GitHub release.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
