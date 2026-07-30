@@ -10,6 +10,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major version is `0`, minor
 version bumps may contain breaking changes.
 
+## 1.0.0 (2026-07-30)
+
+
+### Features
+
+* add review layer, diagram engine, and tech-doc export ([df4b961](https://github.com/sizzlorox/spec-scope/commit/df4b96115a8f410be3d9b2597da3038d140822fe))
+* **web:** add Report reading density and wire README screenshots ([f066d55](https://github.com/sizzlorox/spec-scope/commit/f066d5509f22145447e6cbf9d7e3fe20eb3d7c08))
+
+
+### Bug Fixes
+
+* guide agent to non-keyword ids in authored diagrams ([7b1e4a6](https://github.com/sizzlorox/spec-scope/commit/7b1e4a6abcd173ebf73cb05dbe901a2a03a6b057))
+* watch spec dirs per-directory (Node 24 fs.watch) ([06adbf7](https://github.com/sizzlorox/spec-scope/commit/06adbf7d6515b0b109f79119cd2a9f279f58e03b))
+
 ## 0.1.0
 
 Initial release.

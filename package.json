@@ -1,6 +1,6 @@
 {
   "name": "spec-scope",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Visualize, discuss and resolve Spec Kit / OpenSpec specifications in your browser — auto-generated diagrams, an agent-friendly review loop, and one-file tech docs.",
   "keywords": [
     "spec-kit",
