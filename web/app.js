@@ -227,7 +227,7 @@ function flashNode(node) {
 async function api(path, options) {
   const res = await fetch(path, options);
   if (res.status === 204) return null;
-  let data = null;
+  let data;
   try {
     data = await res.json();
   } catch {
@@ -2510,7 +2510,7 @@ async function renderChanges() {
   const view = el('div', 'review-view');
   view.append(el('h2', null, 'What changed'));
 
-  let changes = [];
+  let changes;
   try {
     const data = await api('/api/changes');
     changes = data.changes || [];
