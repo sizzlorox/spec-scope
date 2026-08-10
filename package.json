@@ -54,7 +54,7 @@
   },
   "dependencies": {
     "marked": "^15.0.7",
-    "mermaid": "^11.4.1"
+    "mermaid": "^11.16.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
